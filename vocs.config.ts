@@ -1,0 +1,61 @@
+import { defineConfig } from "vocs";
+
+export default defineConfig({
+  title: "zimgx",
+  description:
+    "Fast, single-binary image proxy and transformation server. A self-hosted drop-in replacement for Cloudflare Images.",
+  logoUrl: "/logo.svg",
+  rootDir: "docs",
+  topNav: [
+    {
+      text: "Guide",
+      link: "/getting-started",
+      match: "/getting-started",
+    },
+    {
+      text: "Reference",
+      link: "/transforms",
+      match: "/transforms",
+    },
+    {
+      text: "GitHub",
+      link: "https://github.com/officialunofficial/zimgx",
+    },
+  ],
+  sidebar: [
+    {
+      text: "Introduction",
+      items: [
+        { text: "Overview", link: "/" },
+        { text: "Getting Started", link: "/getting-started" },
+        {
+          text: "Migrating from Cloudflare",
+          link: "/migrating-from-cloudflare",
+        },
+      ],
+    },
+    {
+      text: "Reference",
+      items: [
+        { text: "Transform Parameters", link: "/transforms" },
+        { text: "Configuration", link: "/configuration" },
+      ],
+    },
+    {
+      text: "Operations",
+      items: [
+        { text: "Deployment", link: "/deployment" },
+        { text: "Architecture", link: "/architecture" },
+      ],
+    },
+  ],
+  socials: [
+    {
+      icon: "github",
+      link: "https://github.com/officialunofficial/zimgx",
+    },
+  ],
+  theme: {
+    accentColor: "#0046FF",
+  },
+});

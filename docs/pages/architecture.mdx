@@ -1,0 +1,221 @@
+# Architecture
+
+zimgx is a single-threaded HTTP image proxy. It fetches images from a configurable origin, transforms them with libvips, and serves results through a multi-tier cache.
+
+## Request flow
+
+```
+Client Request
+     │
+     ▼
+┌──────────┐     Parse the target path. Detect well-known
+│  Router   │───▶ routes (/health, /ready, /metrics)
+└────┬─────┘     or extract image path and transform string.
+     │
+     ▼
+┌──────────┐     Parse comma-separated key=value pairs
+│  Params   │───▶ into a TransformParams struct. Validate
+│  Parser   │     ranges for w, h, q, fit, g, and others.
+└────┬─────┘
+     │
+     ▼
+┌──────────┐     Build a deterministic key: <path>|<transforms>|<format>
+│  Cache    │───▶ Check L1 (memory), then L2 (R2) if configured.
+│  Lookup   │     Hit → serve with ETag and Cache-Control.
+└────┬─────┘
+     │ miss
+     ▼
+┌──────────┐     HTTP GET to base URL + path, or
+│  Origin   │───▶ S3 GET from the R2 originals bucket.
+│  Fetch    │
+└────┬─────┘
+     │
+     ▼
+┌──────────┐     1. Probe (detect animation, load first frame)
+│ Transform │───▶ 2. Decide and reload (animated or static path)
+│ Pipeline  │     3. Resize → Effects → Encode
+│ (libvips) │
+└────┬─────┘
+     │
+     ▼
+┌──────────┐     Write to L1 (memory) and L2 (R2) if configured.
+│  Cache    │
+│  Store    │
+└────┬─────┘
+     │
+     ▼
+  Response        200 with image body, ETag, Cache-Control, Vary: Accept
+```
+
+## Module map
+
+```
+src/
+├── main.zig              Entry point. Initializes libvips, starts server.
+├── server.zig            HTTP server loop and request dispatch.
+├── router.zig            URL routing. Parses paths into a Route union.
+├── config.zig            ZIMGX_* env var loading and validation.
+├── allocator.zig         Per-request arena allocator.
+│
+├── transform/
+│   ├── params.zig        TransformParams struct and query string parser.
+│   ├── negotiate.zig     Accept header parsing and format negotiation.
+│   └── pipeline.zig      Probe → decide → reload → resize → effects → encode.
+│
+├── http/
+│   ├── response.zig      Content-Type, ETag, Cache-Control, 304 logic.
+│   └── errors.zig        Structured HTTP errors with JSON serialization.
+│
+├── cache/
+│   ├── cache.zig         Cache vtable interface and cache key builder.
+│   ├── memory.zig        In-memory LRU cache (thread-safe).
+│   ├── noop.zig          No-op cache (used when caching is disabled).
+│   ├── r2.zig            R2/S3-backed cache (L2 persistent layer).
+│   └── tiered.zig        L1 plus L2 composition (memory → R2).
+│
+├── origin/
+│   ├── source.zig        URL builder for HTTP origin.
+│   ├── fetcher.zig       HTTP client for origin fetches.
+│   └── r2.zig            R2-backed origin fetcher.
+│
+├── s3/
+│   ├── signing.zig       AWS SigV4 signing (pure crypto, no I/O).
+│   └── client.zig        S3 HTTP client (GET/PUT/DELETE/HEAD).
+│
+└── vips/
+    └── bindings.zig      C interop wrappers for libvips functions.
+```
+
+---
+
+## Cache tiers
+
+zimgx uses a polymorphic `Cache` interface (vtable pattern) with multiple backends:
+
+```
+┌─────────────────────────────────────────┐
+│            TieredCache                  │
+│                                         │
+│  ┌──────────────┐  ┌─────────────────┐  │
+│  │ L1: Memory   │  │ L2: R2 (S3)    │  │
+│  │ (MemoryCache)│  │ (R2Cache)      │  │
+│  │              │  │                 │  │
+│  │ - LRU evict  │  │ - Persistent   │  │
+│  │ - Size-bound │  │ - Cross-restart│  │
+│  │ - Fastest    │  │ - Shared       │  │
+│  └──────────────┘  └─────────────────┘  │
+└─────────────────────────────────────────┘
+```
+
+**Read path:** L1 hit → return. L1 miss → check L2 → promote to L1 → return.
+
+**Write path:** Write to both L1 and L2.
+
+**Delete path:** Delete from both L1 and L2.
+
+When `ZIMGX_CACHE_ENABLED=false`, a `NoopCache` replaces all cache operations with no-ops.
+
+When `ZIMGX_ORIGIN_TYPE=http` (no R2 configured), only the L1 memory cache is active.
+
+---
+
+## Origin backends
+
+### HTTP (`ZIMGX_ORIGIN_TYPE=http`)
+
+Appends the request path to `ZIMGX_ORIGIN_BASE_URL`:
+
+```
+Request:  GET /photos/cat.jpg/w=400
+Origin:   GET https://images.example.com/photos/cat.jpg
+```
+
+### R2 (`ZIMGX_ORIGIN_TYPE=r2`)
+
+Fetches from a Cloudflare R2 bucket using AWS SigV4 signed requests:
+
+```
+Request:  GET /photos/cat.jpg/w=400
+Origin:   S3 GET from bucket "originals", key "photos/cat.jpg"
+```
+
+With R2 origin, the tiered cache uses a second R2 bucket (`ZIMGX_R2_BUCKET_VARIANTS`) as the L2 persistent layer.
+
+---
+
+## Transform pipeline
+
+The pipeline uses a probe-decide-reload flow for animation-aware processing:
+
+```
+┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐
+│  Probe  │───▶│ Decide  │───▶│ Reload  │───▶│ Resize  │───▶│ Effects │───▶│ Encode  │
+└─────────┘    └─────────┘    └─────────┘    └─────────┘    └─────────┘    └─────────┘
+```
+
+### 1. Probe
+
+Loads only the first frame to detect animation metadata via `n-pages`.
+
+### 2. Decide
+
+Determines whether to produce animated output based on: animation mode, frame extraction, output format support, pixel budget, and the `Accept` header.
+
+### 3. Reload
+
+For animated output: unrefs the probe image and reloads all frames stacked vertically. Clamps frame count to `max_frames`. For static output: no-op.
+
+### 4. Resize
+
+Uses `vips_thumbnail_image` with fit mode mapping:
+
+| `fit` value | libvips behavior |
+|-------------|-----------------|
+| `contain` | `VIPS_SIZE_DOWN` — scale down, preserve aspect ratio |
+| `cover` | Crop to fill using gravity for the crop anchor |
+| `fill` | `VIPS_SIZE_FORCE` — stretch to exact dimensions |
+| `inside` | `VIPS_SIZE_DOWN` — same as contain |
+| `outside` | `VIPS_SIZE_UP` — scale up to cover dimensions |
+
+### 5. Effects
+
+Applied in order: sharpen → blur → brightness/contrast → gamma → saturation.
+
+### 6. Encode
+
+| Format | Encoder | Quality |
+|--------|---------|---------|
+| JPEG | `vips_jpegsave_buffer` | 1–100 |
+| PNG | `vips_pngsave_buffer` | Compression level 6 (fixed) |
+| WebP | `vips_webpsave_buffer` | 1–100 |
+| AVIF | `vips_heifsave_buffer` | 1–100 |
+| GIF | `vips_gifsave_buffer` | Palette-based |
+
+---
+
+## Error handling
+
+Errors serialize to JSON:
+
+```json
+{"error":{"status":404,"message":"Not Found","detail":"image not found at origin"}}
+```
+
+| Condition | HTTP status |
+|-----------|-------------|
+| Invalid transform parameters | 400 Bad Request |
+| Transform values out of range | 422 Unprocessable Entity |
+| Image not found at origin | 404 Not Found |
+| Origin server timed out | 504 Gateway Timeout |
+| Image exceeds size limit | 413 Payload Too Large |
+| Origin fetch failed | 502 Bad Gateway |
+
+---
+
+## Single-threaded design
+
+zimgx runs a single-threaded accept loop. This is a deliberate choice:
+
+- **Simplicity** — No mutexes and no data races. Server-owned buffers are safely reused between requests.
+- **libvips threading** — libvips uses its own internal thread pool for image operations. The single Zig thread dispatches work to libvips, which parallelizes the heavy compute.
+- **Scaling** — Run multiple instances behind a load balancer. Each instance maintains its own L1 cache. The shared R2 L2 cache provides cross-instance persistence.

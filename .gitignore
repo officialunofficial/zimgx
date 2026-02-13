@@ -1,0 +1,7 @@
+.env
+.DS_Store
+.zig-cache/
+zig-out/
+node_modules/
+.wrangler/
+docs/dist/

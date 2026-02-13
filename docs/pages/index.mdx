@@ -1,0 +1,78 @@
+# zimgx
+
+An image proxy and transformation server. Written in Zig, powered by libvips.
+
+zimgx sits in front of your existing image storage — any HTTP server or S3/R2 bucket — and handles resizing, format conversion, and caching on the fly. You do not upload images to zimgx. It reads them from wherever they already are.
+
+---
+
+## How it works
+
+zimgx sits between your clients and your image storage:
+
+```
+Client (browser, app)
+  │
+  │  GET /photos/hero.jpg/w=800,f=auto,q=85
+  ▼
+┌──────────┐
+│  zimgx   │──▶ Cache hit? Serve immediately.
+│          │──▶ Cache miss? Fetch from origin.
+│          │──▶ Transform, cache, and serve.
+└──────────┘
+  │
+  ▼
+Origin (S3, R2, any HTTP server)
+```
+
+Your images stay where they already live. zimgx fetches, transforms, caches, and serves them.
+
+---
+
+## Features
+
+- **Real-time transforms** — Resize, crop, convert formats, apply effects, and control animation
+- **Automatic format negotiation** — Serves AVIF, WebP, or JPEG based on the client's `Accept` header
+- **Dual origin support** — Fetch from HTTP or any S3/R2-compatible storage
+- **Multi-tier caching** — In-memory LRU with an optional persistent R2 layer
+- **ETag and conditional requests** — Returns `304 Not Modified` to save bandwidth
+- **Single binary** — No runtime dependencies beyond libvips
+- **Content-aware cropping** — Uses `smart` and `attention` gravity modes via libvips
+- **Animation support** — Resize animated GIFs and WebPs, or extract individual frames
+
+---
+
+## Quick example
+
+```bash
+# Original image, no transforms
+curl https://your-host.com/photos/hero.jpg
+
+# Resize to 400px wide
+curl https://your-host.com/photos/hero.jpg/w=400
+
+# Resize, convert to WebP, quality 85
+curl https://your-host.com/photos/hero.jpg/w=800,h=600,f=webp,q=85
+
+# Smart crop for thumbnails
+curl https://your-host.com/photos/hero.jpg/w=400,h=400,fit=cover,g=smart
+
+# Extract first frame from an animated GIF
+curl https://your-host.com/spinner.gif/frame=0,f=png
+```
+
+---
+
+## URL format
+
+```
+GET /<image-path>/<transforms>
+```
+
+The last path segment is treated as transforms when it contains `=`. Otherwise, the entire path is the image key.
+
+| URL | Image path | Transforms |
+|-----|-----------|------------|
+| `/photos/hero.jpg` | `photos/hero.jpg` | none |
+| `/photos/hero.jpg/w=400` | `photos/hero.jpg` | `w=400` |
+| `/a/b/c.jpg/w=800,h=600,f=webp` | `a/b/c.jpg` | `w=800,h=600,f=webp` |

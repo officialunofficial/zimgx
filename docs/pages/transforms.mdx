@@ -1,0 +1,344 @@
+# Transform parameters
+
+Specify transforms as the last path segment in the URL. zimgx treats a segment as a transform string when it contains `=`. Separate multiple parameters with commas.
+
+```
+GET /<image-path>/<transforms>
+GET /photos/hero.jpg/w=400,h=300,f=webp,q=85
+```
+
+## Dimensions
+
+### `w` / `width`
+
+Output width in pixels, resized according to the current `fit` mode.
+
+- **Range:** 1–8192
+- **Default:** original width
+
+```
+/photo.jpg/w=400
+/photo.jpg/width=400
+```
+
+### `h` / `height`
+
+Output height in pixels.
+
+- **Range:** 1–8192
+- **Default:** original height
+
+```
+/photo.jpg/h=300
+/photo.jpg/w=400,h=300
+```
+
+When you specify only one dimension, zimgx derives the other from the source aspect ratio.
+
+### `dpr`
+
+Device pixel ratio. Multiplies `w` and `h` for retina and HiDPI displays. The effective dimensions are clamped to 8192.
+
+- **Range:** 1.0–5.0
+- **Default:** `1.0`
+
+```
+# 400px at 2x = 800px actual output
+/photo.jpg/w=400,dpr=2
+```
+
+## Quality
+
+### `q` / `quality`
+
+Compression quality for lossy formats (JPEG, WebP, AVIF). Higher values produce larger files with fewer artifacts. Has no effect on PNG.
+
+- **Range:** 1–100
+- **Default:** `80`
+
+```
+/photo.jpg/q=90
+/photo.jpg/w=400,q=60
+```
+
+## Format
+
+### `f` / `fmt` / `format`
+
+Output format. When set to `auto` or omitted, zimgx negotiates the format from the client's `Accept` header.
+
+- **Values:** `jpeg`, `jpg`, `png`, `webp`, `avif`, `gif`, `auto`
+- **Default:** `auto`
+
+```
+/photo.jpg/f=webp
+/photo.jpg/format=avif
+/photo.jpg/fmt=png
+/animation.gif/f=gif
+```
+
+## Fit mode
+
+### `fit`
+
+Controls how the image fits the target dimensions.
+
+| Value | Behavior |
+|-------|----------|
+| `contain` | Scale down to fit within the dimensions. Preserves aspect ratio. Never upscales. **(default)** |
+| `cover` | Scale and crop to fill the exact dimensions. Uses `gravity` to pick the crop anchor. |
+| `fill` | Stretch to exactly fill the dimensions. Ignores aspect ratio. |
+| `inside` | Same as `contain`. |
+| `outside` | Scale up to cover the dimensions. Preserves aspect ratio. |
+
+```
+/photo.jpg/w=400,h=400,fit=cover
+/photo.jpg/w=400,h=300,fit=fill
+```
+
+## Gravity
+
+### `g` / `gravity`
+
+When `fit=cover` crops the image, this controls which region to keep.
+
+| Value | Aliases | Behavior |
+|-------|---------|----------|
+| `center` | `centre` | Crop from center **(default)** |
+| `north` | `n` | Keep the top edge |
+| `south` | `s` | Keep the bottom edge |
+| `east` | `e` | Keep the right edge |
+| `west` | `w` | Keep the left edge |
+| `northeast` | `ne` | Keep the top-right corner |
+| `northwest` | `nw` | Keep the top-left corner |
+| `southeast` | `se` | Keep the bottom-right corner |
+| `southwest` | `sw` | Keep the bottom-left corner |
+| `smart` | — | Entropy-based detection (keeps high-detail areas) |
+| `attention` | `att` | Attention-based detection (keeps visually interesting areas) |
+
+```
+/photo.jpg/w=400,h=400,fit=cover,g=smart
+/photo.jpg/w=400,h=400,fit=cover,g=north
+```
+
+:::info
+For content-aware cropping, use `smart` or `attention`. Directional values (`north`, `south`, and others) fall back to center cropping.
+:::
+
+## Effects
+
+### `sharpen`
+
+Unsharp mask with the given sigma value.
+
+- **Range:** 0.0–10.0
+
+```
+/photo.jpg/sharpen=1.5
+/photo.jpg/w=400,sharpen=2.0
+```
+
+### `blur`
+
+Gaussian blur with the given sigma value.
+
+- **Range:** 0.1–250.0
+
+```
+/photo.jpg/blur=3.0
+/photo.jpg/w=400,blur=10.0
+```
+
+### `brightness`
+
+- **Range:** 0.0–2.0 (1.0 is normal)
+
+```
+/photo.jpg/brightness=1.2
+```
+
+### `contrast`
+
+- **Range:** 0.0–2.0 (1.0 is normal)
+
+```
+/photo.jpg/contrast=1.3
+```
+
+### `saturation`
+
+- **Range:** 0.0–2.0 (1.0 is normal)
+
+```
+/photo.jpg/saturation=0.0
+```
+
+### `gamma`
+
+Gamma correction.
+
+- **Range:** 0.1–10.0
+
+```
+/photo.jpg/gamma=2.2
+```
+
+### `rotate`
+
+- **Values:** 0, 90, 180, 270
+
+```
+/photo.jpg/rotate=90
+```
+
+### `flip`
+
+- **Values:** `h` (horizontal), `v` (vertical), `hv` (both)
+
+```
+/photo.jpg/flip=h
+```
+
+### `bg` / `background`
+
+Hex RGB color to flatten alpha channels onto before encoding. Useful when converting transparent PNGs to JPEG.
+
+- **Format:** 6-character hex, no `#` prefix
+
+```
+/photo.png/f=jpeg,bg=ffffff
+```
+
+### `trim`
+
+Detect and crop uniform borders around the image.
+
+- **Range:** 1.0–100.0 (threshold)
+
+```
+/photo.jpg/trim=10
+```
+
+### `metadata`
+
+Controls EXIF and ICC metadata in the output.
+
+- **Values:** `strip` (default), `keep`, `copyright`
+
+```
+/photo.jpg/metadata=keep
+```
+
+## Animation
+
+### `anim`
+
+Controls whether animated images (GIF, animated WebP) preserve animation in the output.
+
+| Value | Aliases | Behavior |
+|-------|---------|----------|
+| `auto` | `true` | Preserve animation when the input is animated and the output format supports it. **(default)** |
+| `static` | `false` | Strip animation. Serve the first frame only. |
+| `animate` | — | Request animated output. Degrade to static if the format does not support animation. |
+
+```bash
+# Serve an animated GIF, resized
+/spinner.gif/w=64
+
+# Strip animation (Cloudflare-compatible syntax)
+/spinner.gif/anim=false
+
+# Strip animation (zimgx syntax)
+/spinner.gif/anim=static
+```
+
+When `anim=auto` and no explicit format is set, zimgx negotiates an animated-capable format from the `Accept` header: **WebP > GIF**. If the client accepts neither, the output degrades to a static first frame in the best available format.
+
+### `frame`
+
+Extract a specific 0-indexed frame from an animated image and serve it as a static image.
+
+- **Range:** 0–999
+- **Default:** none (all frames preserved)
+
+```
+/spinner.gif/frame=0,f=png
+/spinner.gif/frame=2
+```
+
+If the index exceeds the number of frames, zimgx returns the last frame.
+
+### Animation safety limits
+
+| Limit | Default | Environment variable |
+|-------|---------|-------------|
+| Max frames | 100 | `ZIMGX_TRANSFORM_MAX_FRAMES` |
+| Max total pixels (width x height x frames) | 50,000,000 | `ZIMGX_TRANSFORM_MAX_ANIMATED_PIXELS` |
+
+When the pixel budget is exceeded, the output falls back to a static first frame. When the frame count exceeds `max_frames`, only that many frames load.
+
+---
+
+## Content negotiation
+
+When the output format is `auto` (the default), zimgx picks the best format from the client's `Accept` header.
+
+**Static images:** AVIF > WebP > JPEG > PNG
+
+**Animated images:** WebP > GIF
+
+The negotiation follows these rules:
+
+1. **Explicit format wins.** If you set `f=webp`, zimgx always outputs WebP regardless of `Accept`.
+2. **Animation preservation.** For animated sources, zimgx prefers animated-capable formats (WebP, GIF).
+3. **Alpha channel handling.** When the source has transparency, JPEG is deprioritized because it cannot represent alpha.
+4. **Client support.** Only formats the client advertises in `Accept` are considered.
+5. **Fallback.** If no acceptable format matches, JPEG is the universal fallback.
+
+The response includes a `Vary: Accept` header so CDNs cache different format variants correctly.
+
+---
+
+## Caching behavior
+
+zimgx caches transform results using a deterministic key built from the image path, transform parameters, and resolved output format.
+
+**Key format:** `<image-path>|<transform-string>|<format>`
+
+**Example:** `photos/hero.jpg|w=400,h=300|webp`
+
+Parameter order does not matter. `w=400,h=300` and `h=300,w=400` produce the same cache key.
+
+---
+
+## Error responses
+
+Invalid transforms return structured JSON errors:
+
+| Condition | Status | Example |
+|-----------|--------|---------|
+| Unknown parameter | 400 | `banana=42` |
+| Empty value | 400 | `w=` |
+| Invalid format | 400 | `f=bmp` |
+| Out of range | 422 | `w=0`, `w=9000`, `q=101` |
+
+```json
+{"error":{"status":400,"message":"Bad Request","detail":"invalid transform parameters"}}
+```
+
+---
+
+## Full example
+
+```
+GET /products/shoe-red.png/w=800,h=600,fit=cover,g=attention,f=auto,q=85,dpr=2,sharpen=0.5
+```
+
+This request:
+1. Fetches `products/shoe-red.png` from the origin
+2. Resizes to 1600x1200 effective pixels (800x600 at dpr 2)
+3. Crops to fill using attention-based gravity
+4. Negotiates the output format from the client's `Accept` header
+5. Encodes at quality 85
+6. Applies a light sharpen (sigma 0.5)
+7. Caches the result for subsequent requests
