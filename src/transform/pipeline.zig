@@ -809,6 +809,64 @@ test "animated GIF + resize produces animated output" {
     try testing.expectEqual(@as(u32, 64), result.width);
 }
 
+test "animated gif resize preserves correct page-height for encoding" {
+    testInit();
+    const data = readAnimatedTestFixture() catch return;
+    defer testing.allocator.free(data);
+
+    // Resize to non-trivial dimension — this is the path that caused
+    // SIGSEGV before the page-height fix.
+    var p = TransformParams{};
+    p.width = 32;
+    p.height = 32;
+    p.format = .gif;
+
+    var result = try transform(data, p, "image/gif", null);
+    defer result.deinit();
+
+    try testing.expect(result.data.len > 0);
+    try testing.expectEqual(OutputFormat.gif, result.format);
+    try testing.expect(result.is_animated);
+    try testing.expectEqual(@as(u32, 32), result.width);
+}
+
+test "animated gif with effects encodes without segfault" {
+    testInit();
+    const data = readAnimatedTestFixture() catch return;
+    defer testing.allocator.free(data);
+
+    // Effects on animated images can corrupt frame boundaries.
+    // The pre-encode validation in encodeImage should catch this.
+    var p = TransformParams{};
+    p.width = 64;
+    p.sharpen = 1.5;
+    p.format = .gif;
+
+    var result = try transform(data, p, "image/gif", null);
+    defer result.deinit();
+
+    try testing.expect(result.data.len > 0);
+    try testing.expectEqual(OutputFormat.gif, result.format);
+}
+
+test "animated gif resize and blur encodes correctly" {
+    testInit();
+    const data = readAnimatedTestFixture() catch return;
+    defer testing.allocator.free(data);
+
+    var p = TransformParams{};
+    p.width = 48;
+    p.blur = 1.0;
+    p.format = .gif;
+
+    var result = try transform(data, p, "image/gif", null);
+    defer result.deinit();
+
+    try testing.expect(result.data.len > 0);
+    try testing.expectEqual(OutputFormat.gif, result.format);
+    try testing.expect(result.is_animated);
+}
+
 test "static image is not marked as animated" {
     testInit();
     const data = try readTestFixture();
