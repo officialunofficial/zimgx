@@ -460,7 +460,7 @@ pub fn run(allocator: Allocator) !void {
         if (use_r2) {
             r2_variants_client = S3Client.init(allocator, cfg.r2.endpoint, cfg.r2.bucket_variants, r2_creds);
             r2c = R2Cache.init(allocator, &r2_variants_client);
-            tc = TieredCache.init(mc.cache(), r2c.cache());
+            tc = TieredCache.init(mc.cache(), r2c.cache(), allocator);
             break :blk tc.cache();
         }
 
@@ -511,6 +511,11 @@ pub fn run(allocator: Allocator) !void {
         return error.ThreadPoolError;
     };
     defer pool.deinit();
+
+    // Wire thread pool to tiered cache for async L2 writes.
+    if (use_r2 and cfg.cache.enabled) {
+        tc.pool = &pool;
+    }
 
     std.log.info("zimgx listening on {s}:{d} (workers={d})", .{ cfg.server.host, cfg.server.port, cfg.server.max_connections });
 

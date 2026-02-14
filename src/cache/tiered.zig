@@ -4,7 +4,12 @@
 // (e.g. in-memory) and a persistent L2 (e.g. R2 / disk).  Implements
 // the same Cache.VTable interface so it can be used transparently
 // wherever a Cache is expected.
+//
+// Writes go to L1 synchronously (fast path).  L2 writes are deferred
+// to `putL2` which callers can run asynchronously (e.g. on a thread
+// pool) to keep L2 latency off the critical path.
 
+const std = @import("std");
 const cache_mod = @import("cache.zig");
 const Cache = cache_mod.Cache;
 const CacheEntry = cache_mod.CacheEntry;
@@ -12,10 +17,12 @@ const CacheEntry = cache_mod.CacheEntry;
 pub const TieredCache = struct {
     l1: Cache, // fast layer (e.g. MemoryCache)
     l2: Cache, // persistent layer (e.g. R2Cache)
+    allocator: std.mem.Allocator,
+    pool: ?*std.Thread.Pool = null,
 
     /// Create a TieredCache from two existing Cache interfaces.
-    pub fn init(l1: Cache, l2: Cache) TieredCache {
-        return .{ .l1 = l1, .l2 = l2 };
+    pub fn init(l1: Cache, l2: Cache, allocator: std.mem.Allocator) TieredCache {
+        return .{ .l1 = l1, .l2 = l2, .allocator = allocator };
     }
 
     /// Return the type-erased `Cache` interface backed by this instance.
@@ -24,6 +31,45 @@ pub const TieredCache = struct {
             .ptr = @ptrCast(self),
             .vtable = &vtable,
         };
+    }
+
+    /// Write an entry to L2 (persistent layer) only.  Intended to be
+    /// called from a background thread after the response has been sent.
+    pub fn putL2(self: *TieredCache, key: []const u8, entry: CacheEntry) void {
+        self.l2.put(key, entry);
+    }
+
+    /// Schedule an async L2 write on the thread pool.  Copies key and
+    /// data so the caller can free the originals immediately.  If the
+    /// copy or spawn fails, the write is silently skipped (best-effort).
+    pub fn putL2Async(self: *TieredCache, key: []const u8, entry: CacheEntry) void {
+        const p = self.pool orelse {
+            // No pool — fall back to synchronous write.
+            self.l2.put(key, entry);
+            return;
+        };
+
+        const key_copy = self.allocator.dupe(u8, key) catch return;
+        const data_copy = self.allocator.dupe(u8, entry.data) catch {
+            self.allocator.free(key_copy);
+            return;
+        };
+
+        p.spawn(asyncL2Worker, .{ self, key_copy, data_copy, entry.content_type, entry.created_at }) catch {
+            self.allocator.free(key_copy);
+            self.allocator.free(data_copy);
+        };
+    }
+
+    fn asyncL2Worker(self: *TieredCache, key_copy: []u8, data_copy: []u8, content_type: []const u8, created_at: i64) void {
+        defer self.allocator.free(key_copy);
+        defer self.allocator.free(data_copy);
+
+        self.l2.put(key_copy, .{
+            .data = data_copy,
+            .content_type = content_type,
+            .created_at = created_at,
+        });
     }
 
     // ----- vtable implementation -----
@@ -57,9 +103,10 @@ pub const TieredCache = struct {
     fn vtablePut(ptr: *anyopaque, key: []const u8, entry: CacheEntry) void {
         const self: *TieredCache = @ptrCast(@alignCast(ptr));
 
-        // Write to both layers.
+        // Write L1 synchronously (fast).  L2 is written asynchronously
+        // via putL2Async to keep the R2 upload off the response path.
         self.l1.put(key, entry);
-        self.l2.put(key, entry);
+        self.putL2Async(key, entry);
     }
 
     fn vtableDelete(ptr: *anyopaque, key: []const u8) bool {
@@ -89,7 +136,6 @@ pub const TieredCache = struct {
 // Tests
 // ---------------------------------------------------------------------------
 
-const std = @import("std");
 const memory_cache = @import("memory.zig");
 const MemoryCache = memory_cache.MemoryCache;
 
@@ -99,7 +145,7 @@ test "tiered get miss on both returns null" {
     var mc2 = MemoryCache.init(std.testing.allocator, 4096);
     defer mc2.deinit();
 
-    var tc = TieredCache.init(mc1.cache(), mc2.cache());
+    var tc = TieredCache.init(mc1.cache(), mc2.cache(), std.testing.allocator);
     const c = tc.cache();
 
     try std.testing.expect(c.get("nonexistent") == null);
@@ -111,7 +157,7 @@ test "tiered put stores in both L1 and L2" {
     var mc2 = MemoryCache.init(std.testing.allocator, 4096);
     defer mc2.deinit();
 
-    var tc = TieredCache.init(mc1.cache(), mc2.cache());
+    var tc = TieredCache.init(mc1.cache(), mc2.cache(), std.testing.allocator);
     const c = tc.cache();
 
     const entry = CacheEntry{
@@ -144,7 +190,7 @@ test "tiered get from L1 (L1 hit)" {
     // Put directly into L1 only.
     mc1.cache().put("key", .{ .data = "l1-data", .content_type = "text/plain", .created_at = 42 });
 
-    var tc = TieredCache.init(mc1.cache(), mc2.cache());
+    var tc = TieredCache.init(mc1.cache(), mc2.cache(), std.testing.allocator);
     const c = tc.cache();
 
     const got = c.get("key");
@@ -168,7 +214,7 @@ test "tiered get promotes from L2 to L1" {
     // Verify L1 is empty before the tiered get.
     try std.testing.expect(mc1.cache().get("key") == null);
 
-    var tc = TieredCache.init(mc1.cache(), mc2.cache());
+    var tc = TieredCache.init(mc1.cache(), mc2.cache(), std.testing.allocator);
     const c = tc.cache();
 
     const got = c.get("key");
@@ -189,7 +235,7 @@ test "tiered delete removes from both" {
     var mc2 = MemoryCache.init(std.testing.allocator, 4096);
     defer mc2.deinit();
 
-    var tc = TieredCache.init(mc1.cache(), mc2.cache());
+    var tc = TieredCache.init(mc1.cache(), mc2.cache(), std.testing.allocator);
     const c = tc.cache();
 
     c.put("key", .{ .data = "data", .content_type = "ct", .created_at = 0 });
@@ -213,7 +259,7 @@ test "tiered delete returns true when entry exists, false when it doesn't" {
     var mc2 = MemoryCache.init(std.testing.allocator, 4096);
     defer mc2.deinit();
 
-    var tc = TieredCache.init(mc1.cache(), mc2.cache());
+    var tc = TieredCache.init(mc1.cache(), mc2.cache(), std.testing.allocator);
     const c = tc.cache();
 
     // Delete on empty cache should return false.
@@ -233,7 +279,7 @@ test "tiered clear empties both" {
     var mc2 = MemoryCache.init(std.testing.allocator, 4096);
     defer mc2.deinit();
 
-    var tc = TieredCache.init(mc1.cache(), mc2.cache());
+    var tc = TieredCache.init(mc1.cache(), mc2.cache(), std.testing.allocator);
     const c = tc.cache();
 
     c.put("a", .{ .data = "1", .content_type = "t", .created_at = 0 });
@@ -256,7 +302,7 @@ test "tiered size returns L1 size" {
     var mc2 = MemoryCache.init(std.testing.allocator, 4096);
     defer mc2.deinit();
 
-    var tc = TieredCache.init(mc1.cache(), mc2.cache());
+    var tc = TieredCache.init(mc1.cache(), mc2.cache(), std.testing.allocator);
     const c = tc.cache();
 
     try std.testing.expectEqual(@as(usize, 0), c.size());
