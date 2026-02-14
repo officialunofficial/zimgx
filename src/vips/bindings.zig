@@ -160,6 +160,11 @@ pub fn getPageHeight(image: VipsImage) ?u32 {
     return @intCast(val);
 }
 
+/// Set an integer metadata property on a VipsImage.
+pub fn setInt(image: VipsImage, name: [*:0]const u8, value: c_int) void {
+    c.vips_image_set_int(image.ptr, name, value);
+}
+
 // ---------------------------------------------------------------------------
 // Thumbnail / resize
 // ---------------------------------------------------------------------------
