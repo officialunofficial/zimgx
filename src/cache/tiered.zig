@@ -5,9 +5,9 @@
 // the same Cache.VTable interface so it can be used transparently
 // wherever a Cache is expected.
 //
-// Writes go to L1 synchronously (fast path).  L2 writes are deferred
-// to `putL2` which callers can run asynchronously (e.g. on a thread
-// pool) to keep L2 latency off the critical path.
+// Writes go to L1 synchronously (fast path).  L2 writes are dispatched
+// asynchronously via the thread pool to keep upload latency off the
+// critical path.
 
 const std = @import("std");
 const cache_mod = @import("cache.zig");
@@ -33,18 +33,11 @@ pub const TieredCache = struct {
         };
     }
 
-    /// Write an entry to L2 (persistent layer) only.  Intended to be
-    /// called from a background thread after the response has been sent.
-    pub fn putL2(self: *TieredCache, key: []const u8, entry: CacheEntry) void {
-        self.l2.put(key, entry);
-    }
-
     /// Schedule an async L2 write on the thread pool.  Copies key and
     /// data so the caller can free the originals immediately.  If the
     /// copy or spawn fails, the write is silently skipped (best-effort).
     pub fn putL2Async(self: *TieredCache, key: []const u8, entry: CacheEntry) void {
         const p = self.pool orelse {
-            // No pool — fall back to synchronous write.
             self.l2.put(key, entry);
             return;
         };

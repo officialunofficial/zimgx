@@ -553,22 +553,10 @@ pub fn gFree(ptr: ?*anyopaque) void {
 // Tests
 // ===========================================================================
 
-/// Read the test fixture PNG at runtime. The path is resolved relative to
-/// the workspace root using the build-system's source root marker.
+/// Read the test fixture PNG at runtime. The cwd is the project root
+/// when running via `zig build test`.
 fn readTestFixture() ![]const u8 {
-    // When tests run, the cwd is the project root.
-    const file = std.fs.cwd().openFile("test/fixtures/test_4x4.png", .{}) catch {
-        // If CWD isn't project root, try absolute path as fallback.
-        const f = try std.fs.openFileAbsolute(
-            "/Users/christopherw/Workspaces/officialunofficial/zimg/test/fixtures/test_4x4.png",
-            .{},
-        );
-        const stat = try f.stat();
-        const buf = try testing.allocator.alloc(u8, stat.size);
-        const n = try f.readAll(buf);
-        f.close();
-        return buf[0..n];
-    };
+    const file = try std.fs.cwd().openFile("test/fixtures/test_4x4.png", .{});
     const stat = try file.stat();
     const buf = try testing.allocator.alloc(u8, stat.size);
     const n = try file.readAll(buf);

@@ -389,19 +389,23 @@ fn encodeImage(
         .png => bindings.pngsaveBufferOpts(image, 6, do_strip),
         .webp => bindings.webpsaveBufferOpts(image, q, do_strip),
         .avif => bindings.avifsaveBufferOpts(image, q, do_strip),
-        .gif => blk: {
-            // If page-height is stale (doesn't evenly divide the total
-            // height), reset to single-frame to prevent encoder SIGSEGV.
-            if (bindings.getPageHeight(image)) |ph| {
-                const h = bindings.getHeight(image);
-                if (ph > h or h % ph != 0) {
-                    bindings.setInt(image, "page-height", @intCast(h));
-                    bindings.setInt(image, "n-pages", 1);
-                }
-            }
-            break :blk bindings.gifsaveBuffer(image);
-        },
+        .gif => encodeGif(image),
     };
+}
+
+/// Encode a VipsImage as GIF.  Before encoding, validates that
+/// page-height metadata evenly divides the total image height.
+/// Stale metadata (left over from resize or effects) would cause
+/// a SIGSEGV in the GIF encoder, so we reset to single-frame.
+fn encodeGif(image: VipsImage) VipsError!bindings.SaveBuffer {
+    if (bindings.getPageHeight(image)) |ph| {
+        const h = bindings.getHeight(image);
+        if (ph > h or h % ph != 0) {
+            bindings.setInt(image, "page-height", @intCast(h));
+            bindings.setInt(image, "n-pages", 1);
+        }
+    }
+    return bindings.gifsaveBuffer(image);
 }
 
 // ===========================================================================
@@ -410,19 +414,10 @@ fn encodeImage(
 
 const testing = std.testing;
 
-/// Read the 4x4 RGBA PNG test fixture at runtime.
+/// Read the 4x4 RGBA PNG test fixture at runtime. The cwd is the
+/// project root when running via `zig build test`.
 fn readTestFixture() ![]const u8 {
-    const file = std.fs.cwd().openFile("test/fixtures/test_4x4.png", .{}) catch {
-        const f = try std.fs.openFileAbsolute(
-            "/Users/christopherw/Workspaces/officialunofficial/zimg/test/fixtures/test_4x4.png",
-            .{},
-        );
-        const stat = try f.stat();
-        const buf = try testing.allocator.alloc(u8, stat.size);
-        const n = try f.readAll(buf);
-        f.close();
-        return buf[0..n];
-    };
+    const file = try std.fs.cwd().openFile("test/fixtures/test_4x4.png", .{});
     const stat = try file.stat();
     const buf = try testing.allocator.alloc(u8, stat.size);
     const n = try file.readAll(buf);

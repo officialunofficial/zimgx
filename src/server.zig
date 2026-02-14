@@ -167,12 +167,14 @@ pub const Server = struct {
     // -----------------------------------------------------------------
 
     fn buildMetricsResponse(self: *Server) ServerResponse {
-        const now = std.time.timestamp();
-        self.stats.uptime_seconds = now - self.start_time;
-        self.stats.cache_entries = self.image_cache.size();
+        // Snapshot volatile stats for metrics — reads are non-atomic
+        // because exact precision is not required for monitoring.
+        var stats = self.stats;
+        stats.uptime_seconds = std.time.timestamp() - self.start_time;
+        stats.cache_entries = self.image_cache.size();
 
         var buf: [512]u8 = undefined;
-        const json = self.stats.toJson(&buf);
+        const json = stats.toJson(&buf);
 
         // Copy into thread-local buffer so the slice outlives this frame.
         const tl_buf = &metrics_tl_buf;
