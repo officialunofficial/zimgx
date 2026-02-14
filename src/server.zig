@@ -132,6 +132,8 @@ pub const Server = struct {
     start_time: i64,
     /// Optional R2 origin fetcher (set when origin_type == .r2).
     r2_fetcher: ?*R2Fetcher = null,
+    /// Active connection count for rate limiting.
+    active_connections: u32 = 0,
 
     pub fn init(allocator: Allocator, cfg: Config, image_cache: Cache) Server {
         return .{
@@ -529,6 +531,14 @@ pub fn run(allocator: Allocator) !void {
             continue;
         };
 
+        // Rate limit: reject when at capacity.
+        const current = @atomicLoad(u32, &server.active_connections, .monotonic);
+        if (current >= cfg.server.max_connections) {
+            conn.stream.close();
+            std.log.warn("Connection rejected: at capacity ({d}/{d})", .{ current, cfg.server.max_connections });
+            continue;
+        }
+
         pool.spawn(handleConnection, .{ &server, conn }) catch {
             conn.stream.close();
             std.log.warn("Failed to queue connection", .{});
@@ -538,6 +548,8 @@ pub fn run(allocator: Allocator) !void {
 }
 
 fn handleConnection(server: *Server, conn: net.Server.Connection) void {
+    _ = @atomicRmw(u32, &server.active_connections, .Add, 1, .monotonic);
+    defer _ = @atomicRmw(u32, &server.active_connections, .Sub, 1, .monotonic);
     defer conn.stream.close();
 
     var read_buf: [8192]u8 = undefined;

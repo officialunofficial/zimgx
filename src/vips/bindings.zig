@@ -121,18 +121,27 @@ pub fn imageNewFromBufferAnimatedN(data: []const u8, n_frames: c_int) VipsError!
 // ---------------------------------------------------------------------------
 
 /// Return the image width in pixels.
+/// Guards against negative C return values to prevent @intCast UB.
 pub fn getWidth(image: VipsImage) u32 {
-    return @intCast(c.vips_image_get_width(image.ptr));
+    const raw = c.vips_image_get_width(image.ptr);
+    if (raw < 0) return 0;
+    return @intCast(raw);
 }
 
 /// Return the image height in pixels.
+/// Guards against negative C return values to prevent @intCast UB.
 pub fn getHeight(image: VipsImage) u32 {
-    return @intCast(c.vips_image_get_height(image.ptr));
+    const raw = c.vips_image_get_height(image.ptr);
+    if (raw < 0) return 0;
+    return @intCast(raw);
 }
 
 /// Return the number of bands (channels) in the image.
+/// Guards against negative C return values to prevent @intCast UB.
 pub fn getBands(image: VipsImage) u32 {
-    return @intCast(c.vips_image_get_bands(image.ptr));
+    const raw = c.vips_image_get_bands(image.ptr);
+    if (raw < 0) return 0;
+    return @intCast(raw);
 }
 
 /// Return true if the image has an alpha channel.

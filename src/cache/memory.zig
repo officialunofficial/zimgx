@@ -107,28 +107,18 @@ pub const MemoryCache = struct {
     // ----- actual logic -----
 
     fn getEntry(self: *MemoryCache, key: []const u8) ?CacheEntry {
-        self.lock.lockShared();
-        defer self.lock.unlockShared();
-
-        const stored = self.map.get(key) orelse return null;
-
-        // Update access counter -- need exclusive access for mutation.
-        // We upgrade by releasing shared and taking exclusive.  This is
-        // acceptable for the access-counter bump (a tiny race where two
-        // concurrent gets both bump is harmless for LRU ordering).
-        self.lock.unlockShared();
         self.lock.lock();
-        if (self.map.getPtr(key)) |ptr| {
-            self.access_counter += 1;
-            ptr.last_access = self.access_counter;
-        }
-        self.lock.unlock();
-        self.lock.lockShared();
+        defer self.lock.unlock();
+
+        const ptr = self.map.getPtr(key) orelse return null;
+
+        self.access_counter += 1;
+        ptr.last_access = self.access_counter;
 
         return CacheEntry{
-            .data = stored.data,
-            .content_type = stored.content_type,
-            .created_at = stored.created_at,
+            .data = ptr.data,
+            .content_type = ptr.content_type,
+            .created_at = ptr.created_at,
         };
     }
 

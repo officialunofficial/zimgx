@@ -87,7 +87,9 @@ pub const TieredCache = struct {
         if (self.l2.get(key)) |entry| {
             // Promote to L1 so subsequent reads are fast.
             self.l1.put(key, entry);
-            return entry;
+            // Return L1's copy which has stable ownership, rather than
+            // L2's entry whose backing memory may be invalidated.
+            return self.l1.get(key);
         }
 
         return null;

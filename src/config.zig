@@ -217,8 +217,10 @@ pub const Config = struct {
             return ConfigError.InvalidQuality;
         }
 
-        // base_url must not be empty (when using HTTP origin)
-        if (self.origin.origin_type == .http and self.origin.base_url.len == 0) return ConfigError.InvalidUrl;
+        // base_url must have a valid http(s) scheme (when using HTTP origin)
+        if (self.origin.origin_type == .http) {
+            if (!hasHttpScheme(self.origin.base_url)) return ConfigError.InvalidUrl;
+        }
 
         // When origin_type is .r2, R2 fields must be non-empty
         if (self.origin.origin_type == .r2) {
@@ -233,6 +235,12 @@ pub const Config = struct {
     // -----------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------
+
+    /// Returns true when `url` starts with `http://` or `https://`.
+    fn hasHttpScheme(url: []const u8) bool {
+        return std.mem.startsWith(u8, url, "http://") or
+            std.mem.startsWith(u8, url, "https://");
+    }
 
     /// Retrieve an environment variable as a Zig slice, or null if unset.
     fn getEnvSlice(name: []const u8) ?[]const u8 {
@@ -301,6 +309,24 @@ test "validate rejects empty base_url" {
     var cfg = Config.defaults();
     cfg.origin.base_url = "";
     try std.testing.expectError(ConfigError.InvalidUrl, cfg.validate());
+}
+
+test "validate rejects base_url without http scheme" {
+    var cfg = Config.defaults();
+    cfg.origin.base_url = "ftp://example.com";
+    try std.testing.expectError(ConfigError.InvalidUrl, cfg.validate());
+}
+
+test "validate rejects base_url with file scheme" {
+    var cfg = Config.defaults();
+    cfg.origin.base_url = "file:///etc/passwd";
+    try std.testing.expectError(ConfigError.InvalidUrl, cfg.validate());
+}
+
+test "validate accepts https base_url" {
+    var cfg = Config.defaults();
+    cfg.origin.base_url = "https://cdn.example.com";
+    try cfg.validate();
 }
 
 test "validate rejects quality 0" {

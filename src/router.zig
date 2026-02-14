@@ -127,8 +127,9 @@ pub fn sanitizePath(path: []const u8) RouterError![]const u8 {
         return RouterError.InvalidPath;
     }
 
-    // Reject directory traversal.
-    if (containsTraversal(stripped)) {
+    // Reject directory traversal — both literal (`..`) and
+    // percent-encoded (`%2e`, `%2f`, `%00`) forms.
+    if (containsTraversal(stripped) or containsEncodedTraversal(stripped)) {
         return RouterError.PathTraversal;
     }
 
@@ -164,6 +165,26 @@ fn containsTraversal(path: []const u8) bool {
     // Check for "/../" anywhere
     if (mem.indexOf(u8, path, "/../")) |_| return true;
 
+    return false;
+}
+
+/// Returns `true` when `path` contains percent-encoded sequences that
+/// could bypass literal traversal/null-byte checks after URL decoding.
+///
+/// Rejects: %2e/%2E (dot), %2f/%2F (slash), %00 (null byte).
+fn containsEncodedTraversal(path: []const u8) bool {
+    var i: usize = 0;
+    while (i < path.len) : (i += 1) {
+        if (path[i] != '%' or i + 2 >= path.len) continue;
+
+        const hi = path[i + 1];
+        const lo = path[i + 2];
+
+        // %2e / %2E (dot), %2f / %2F (slash)
+        if (hi == '2' and (lo == 'e' or lo == 'E' or lo == 'f' or lo == 'F')) return true;
+        // %00 (null byte)
+        if (hi == '0' and lo == '0') return true;
+    }
     return false;
 }
 
@@ -329,4 +350,25 @@ test "multiple transform-like segments — only last is treated as transform" {
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "sanitizePath rejects percent-encoded dot traversal" {
+    try testing.expectError(RouterError.PathTraversal, sanitizePath("/photos/%2e%2e/etc/passwd"));
+}
+
+test "sanitizePath rejects uppercase percent-encoded dot" {
+    try testing.expectError(RouterError.PathTraversal, sanitizePath("/photos/%2E%2E/etc/passwd"));
+}
+
+test "sanitizePath rejects encoded null byte" {
+    try testing.expectError(RouterError.PathTraversal, sanitizePath("/photos/cat%00.jpg"));
+}
+
+test "sanitizePath rejects encoded slash" {
+    try testing.expectError(RouterError.PathTraversal, sanitizePath("/photos%2Fcat.jpg"));
+}
+
+test "encoded traversal in resolve returns not_found" {
+    const route = resolve("/photos/%2e%2e/etc/passwd");
+    try testing.expect(route == .not_found);
 }

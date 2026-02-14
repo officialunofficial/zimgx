@@ -180,19 +180,22 @@ pub const R2Cache = struct {
     ///
     /// Replaces `|` with `/` and collapses consecutive `/` so that
     /// empty segments (e.g. `path||format` → `path/format`) don't
-    /// create double-slash S3 keys.
+    /// create double-slash S3 keys.  Rejects keys containing `..`
+    /// to prevent directory traversal in the S3 key space.
     pub fn sanitizeKey(key: []const u8, buf: []u8) []const u8 {
         var out: usize = 0;
         var prev_slash = false;
         for (key) |raw| {
-            const c: u8 = if (raw == '|') '/' else raw;
-            if (c == '/' and prev_slash) continue;
+            const ch: u8 = if (raw == '|') '/' else raw;
+            if (ch == '/' and prev_slash) continue;
             if (out >= buf.len) break;
-            buf[out] = c;
+            buf[out] = ch;
             out += 1;
-            prev_slash = (c == '/');
+            prev_slash = (ch == '/');
         }
-        return buf[0..out];
+        const result = buf[0..out];
+        if (std.mem.indexOf(u8, result, "..") != null) return buf[0..0];
+        return result;
     }
 };
 
@@ -248,6 +251,12 @@ test "sanitizeKey leaves key unchanged when no pipes" {
     var buf: [256]u8 = undefined;
     const result = R2Cache.sanitizeKey("simple-key", &buf);
     try std.testing.expectEqualStrings("simple-key", result);
+}
+
+test "sanitizeKey rejects traversal sequences" {
+    var buf: [256]u8 = undefined;
+    const result = R2Cache.sanitizeKey("photos/../etc/passwd|w=400|webp", &buf);
+    try std.testing.expectEqualStrings("", result);
 }
 
 test "size returns 0" {

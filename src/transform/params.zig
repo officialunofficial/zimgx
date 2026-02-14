@@ -469,7 +469,9 @@ fn parseU32(s: []const u8) ?u32 {
 }
 
 fn parseF32(s: []const u8) ?f32 {
-    return fmt.parseFloat(f32, s) catch null;
+    const val = fmt.parseFloat(f32, s) catch return null;
+    if (std.math.isNan(val) or std.math.isInf(val)) return null;
+    return val;
 }
 
 fn parseHexColor(s: []const u8) ?[3]u8 {
@@ -703,6 +705,18 @@ test "parse sharpen and blur values" {
     const params = try parse("sharpen=1.5,blur=3.0");
     try testing.expectEqual(@as(f32, 1.5), params.sharpen.?);
     try testing.expectEqual(@as(f32, 3.0), params.blur.?);
+}
+
+test "parse rejects nan values" {
+    try testing.expectError(ParseError.InvalidSharpen, parse("sharpen=nan"));
+    try testing.expectError(ParseError.InvalidBlur, parse("blur=nan"));
+    try testing.expectError(ParseError.InvalidDpr, parse("dpr=nan"));
+}
+
+test "parse rejects inf values" {
+    try testing.expectError(ParseError.InvalidSharpen, parse("sharpen=inf"));
+    try testing.expectError(ParseError.InvalidBlur, parse("blur=inf"));
+    try testing.expectError(ParseError.InvalidGamma, parse("gamma=inf"));
 }
 
 test "cache key order is canonical regardless of parse order" {
