@@ -91,10 +91,15 @@ pub fn build(b: *std.Build) void {
 
 fn addVipsDeps(mod: *std.Build.Module) void {
     mod.link_libc = true;
-    mod.addIncludePath(.{ .cwd_relative = "/opt/homebrew/Cellar/vips/8.18.0_2/include" });
-    mod.addIncludePath(.{ .cwd_relative = "/opt/homebrew/Cellar/glib/2.86.3/include/glib-2.0" });
-    mod.addIncludePath(.{ .cwd_relative = "/opt/homebrew/Cellar/glib/2.86.3/lib/glib-2.0/include" });
-    mod.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/Cellar/vips/8.18.0_2/lib" });
-    mod.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/Cellar/glib/2.86.3/lib" });
     mod.linkSystemLibrary("vips", .{});
+
+    // macOS Homebrew: headers and libraries are not in the default
+    // search path, so we add the Cellar locations explicitly.
+    if (@import("builtin").os.tag == .macos) {
+        mod.addIncludePath(.{ .cwd_relative = "/opt/homebrew/Cellar/vips/8.18.0_2/include" });
+        mod.addIncludePath(.{ .cwd_relative = "/opt/homebrew/Cellar/glib/2.86.3/include/glib-2.0" });
+        mod.addIncludePath(.{ .cwd_relative = "/opt/homebrew/Cellar/glib/2.86.3/lib/glib-2.0/include" });
+        mod.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/Cellar/vips/8.18.0_2/lib" });
+        mod.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/Cellar/glib/2.86.3/lib" });
+    }
 }
