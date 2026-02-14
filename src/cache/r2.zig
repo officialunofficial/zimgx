@@ -4,10 +4,9 @@
 // implementation.  All S3 errors are caught and handled gracefully:
 // get returns null, put is best-effort, delete returns false.
 //
-// Since the Cache vtable interface has no "release" mechanism for
-// returned data, the last-fetched response is stored in the struct
-// itself and freed on the next get call.  This is safe for
-// single-threaded use.
+// Thread-safe via Mutex.  The last-fetched response is stored in the
+// struct itself (no "release" in the Cache vtable) and freed on the
+// next get call; the mutex serializes access to this shared state.
 
 const std = @import("std");
 const cache_mod = @import("cache.zig");
@@ -19,6 +18,7 @@ const S3Client = s3_client.S3Client;
 pub const R2Cache = struct {
     client: *S3Client,
     allocator: std.mem.Allocator,
+    mutex: std.Thread.Mutex = .{},
 
     /// Last-fetched data buffer, kept alive so the CacheEntry returned
     /// by get() remains valid until the next get() call.
@@ -60,6 +60,8 @@ pub const R2Cache = struct {
 
     fn vtableGet(ptr: *anyopaque, key: []const u8) ?CacheEntry {
         const self: *R2Cache = @ptrCast(@alignCast(ptr));
+        self.mutex.lock();
+        defer self.mutex.unlock();
 
         // Free previous last-fetched buffers.
         self.freeLastFetched();
@@ -94,6 +96,8 @@ pub const R2Cache = struct {
 
     fn vtablePut(ptr: *anyopaque, key: []const u8, entry: CacheEntry) void {
         const self: *R2Cache = @ptrCast(@alignCast(ptr));
+        self.mutex.lock();
+        defer self.mutex.unlock();
 
         var key_buf: [1024]u8 = undefined;
         const s3_key = sanitizeKey(key, &key_buf);
@@ -104,6 +108,8 @@ pub const R2Cache = struct {
 
     fn vtableDelete(ptr: *anyopaque, key: []const u8) bool {
         const self: *R2Cache = @ptrCast(@alignCast(ptr));
+        self.mutex.lock();
+        defer self.mutex.unlock();
 
         var key_buf: [1024]u8 = undefined;
         const s3_key = sanitizeKey(key, &key_buf);

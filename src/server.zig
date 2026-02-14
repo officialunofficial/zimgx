@@ -498,11 +498,14 @@ pub fn run(allocator: Allocator) !void {
     };
     defer listener.deinit();
 
-    // 7. Create thread pool for connection handling
+    // 7. Create thread pool for connection handling.
+    // Explicit stack size: musl (Alpine) defaults to ~128KB which is too
+    // small for the deep call stacks through HTTP client + TLS + S3.
     var pool: std.Thread.Pool = undefined;
     pool.init(.{
         .allocator = allocator,
         .n_jobs = cfg.server.max_connections,
+        .stack_size = 2 * 1024 * 1024, // 2 MiB per worker
     }) catch {
         std.log.err("Failed to create thread pool", .{});
         return error.ThreadPoolError;
