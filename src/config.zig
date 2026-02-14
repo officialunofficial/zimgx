@@ -28,7 +28,7 @@ pub const ServerConfig = struct {
     host: []const u8 = "0.0.0.0",
     request_timeout_ms: u32 = 30_000,
     max_request_size: usize = 50 * 1024 * 1024,
-    max_connections: u16 = 64,
+    max_connections: u16 = 256,
 };
 
 pub const OriginType = enum {
@@ -266,7 +266,7 @@ test "defaults returns expected values" {
     try std.testing.expectEqualStrings("0.0.0.0", cfg.server.host);
     try std.testing.expectEqual(@as(u32, 30_000), cfg.server.request_timeout_ms);
     try std.testing.expectEqual(@as(usize, 50 * 1024 * 1024), cfg.server.max_request_size);
-    try std.testing.expectEqual(@as(u16, 64), cfg.server.max_connections);
+    try std.testing.expectEqual(@as(u16, 256), cfg.server.max_connections);
 
     // origin
     try std.testing.expectEqualStrings("http://localhost:9000", cfg.origin.base_url);
