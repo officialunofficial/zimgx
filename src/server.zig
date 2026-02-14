@@ -132,13 +132,6 @@ pub const Server = struct {
     start_time: i64,
     /// Optional R2 origin fetcher (set when origin_type == .r2).
     r2_fetcher: ?*R2Fetcher = null,
-    /// Scratch buffer for metrics JSON.
-    metrics_buf: [512]u8 = undefined,
-    /// Scratch buffers for image response headers (reused per-request,
-    /// safe because the server is single-threaded and responds before
-    /// the next request mutates these).
-    etag_buf: [16]u8 = undefined,
-    cc_buf: [64]u8 = undefined,
 
     pub fn init(allocator: Allocator, cfg: Config, image_cache: Cache) Server {
         return .{
@@ -156,8 +149,9 @@ pub const Server = struct {
 
     /// Dispatch a parsed route to the appropriate handler and return a
     /// ServerResponse.  This function is pure logic -- no network I/O.
+    /// Thread-safe: called concurrently from worker threads.
     pub fn dispatchRoute(self: *Server, route: Route, if_none_match: ?[]const u8, accept_header: ?[]const u8) ServerResponse {
-        self.stats.requests_total += 1;
+        _ = @atomicRmw(u64, &self.stats.requests_total, .Add, 1, .monotonic);
 
         return switch (route) {
             .health => ServerResponse.health_ok,
@@ -180,15 +174,14 @@ pub const Server = struct {
         var buf: [512]u8 = undefined;
         const json = self.stats.toJson(&buf);
 
-        // Copy into a static buffer that outlives this call frame.
-        // For the server loop this is fine because we send immediately.
-        // For tests we rely on the body being compared before reuse.
-        @memcpy(self.metrics_buf[0..json.len], json);
+        // Copy into thread-local buffer so the slice outlives this frame.
+        const tl_buf = &metrics_tl_buf;
+        @memcpy(tl_buf[0..json.len], json);
 
         return .{
             .status = 200,
             .content_type = "application/json",
-            .body = self.metrics_buf[0..json.len],
+            .body = tl_buf[0..json.len],
         };
     }
 
@@ -234,11 +227,11 @@ pub const Server = struct {
 
         // 4. Check cache
         if (self.image_cache.get(cache_key)) |entry| {
-            self.stats.cache_hits += 1;
+            _ = @atomicRmw(u64, &self.stats.cache_hits, .Add, 1, .monotonic);
             return self.serveCachedEntry(entry, if_none_match);
         }
 
-        self.stats.cache_misses += 1;
+        _ = @atomicRmw(u64, &self.stats.cache_misses, .Add, 1, .monotonic);
 
         // 5. Fetch from origin (HTTP or R2)
         var fetch_result = self.fetchFromOrigin(req.image_path) catch |err| {
@@ -321,28 +314,30 @@ pub const Server = struct {
         return path;
     }
 
-    /// Build a response from a cache entry, using server-owned buffers
+    /// Build a response from a cache entry, using thread-local buffers
     /// for ETag and Cache-Control so the slices outlive this function.
     fn serveCachedEntry(self: *Server, entry: CacheEntry, if_none_match: ?[]const u8) ServerResponse {
-        // Generate ETag into server-owned buffer
+        // Generate ETag into thread-local buffer
         const etag_raw = response_mod.generateEtag(entry.data);
-        @memcpy(&self.etag_buf, &etag_raw);
+        const etag_buf = &etag_tl_buf;
+        @memcpy(etag_buf, &etag_raw);
 
         // Check If-None-Match for 304
-        if (response_mod.shouldReturn304(if_none_match, &self.etag_buf)) {
+        if (response_mod.shouldReturn304(if_none_match, etag_buf)) {
             return .{
                 .status = 304,
                 .content_type = entry.content_type,
                 .body = "",
-                .etag = &self.etag_buf,
+                .etag = etag_buf,
             };
         }
 
-        // Build Cache-Control into server-owned buffer
+        // Build Cache-Control into thread-local buffer
+        const cc_buf = &cc_tl_buf;
         const cc = response_mod.buildCacheControl(
             self.config.cache.default_ttl_seconds,
             true,
-            &self.cc_buf,
+            cc_buf,
         );
 
         return .{
@@ -350,7 +345,7 @@ pub const Server = struct {
             .content_type = entry.content_type,
             .body = entry.data,
             .cache_control = cc,
-            .etag = &self.etag_buf,
+            .etag = etag_buf,
             .vary = "Accept",
         };
     }
@@ -373,16 +368,13 @@ pub const Server = struct {
 fn errorToStaticJson(err: HttpError) []const u8 {
     // For well-known errors, return compile-time string literals.
     // For others, fall back to a generic message.
-    if (err.detail) |detail| {
-        _ = detail;
-        // With detail we need to use the dynamic path -- but since we
-        // return a []const u8 that must outlive the function, we use a
-        // thread-local buffer.
+    if (err.detail != null) {
+        // Detail requires dynamic formatting; copy into thread-local
+        // storage so the slice outlives this function.
         var buf: [512]u8 = undefined;
         const json = err.toJsonResponse(&buf);
-        // Copy to thread-local static storage
-        @memcpy(error_json_buf[0..json.len], json);
-        return error_json_buf[0..json.len];
+        @memcpy(error_tl_buf[0..json.len], json);
+        return error_tl_buf[0..json.len];
     }
 
     return switch (err.status) {
@@ -397,8 +389,12 @@ fn errorToStaticJson(err: HttpError) []const u8 {
     };
 }
 
-/// Thread-local buffer for dynamic error JSON serialization.
-var error_json_buf: [512]u8 = undefined;
+// Thread-local buffers for response construction. Each worker thread
+// gets its own copy so there are no data races.
+threadlocal var error_tl_buf: [512]u8 = undefined;
+threadlocal var metrics_tl_buf: [512]u8 = undefined;
+threadlocal var etag_tl_buf: [16]u8 = undefined;
+threadlocal var cc_tl_buf: [64]u8 = undefined;
 
 // ---------------------------------------------------------------------------
 // HTTP header extraction helpers
@@ -502,52 +498,54 @@ pub fn run(allocator: Allocator) !void {
     };
     defer listener.deinit();
 
-    std.log.info("zimgx listening on {s}:{d}", .{ cfg.server.host, cfg.server.port });
+    // 7. Create thread pool for connection handling
+    var pool: std.Thread.Pool = undefined;
+    pool.init(.{
+        .allocator = allocator,
+        .n_jobs = cfg.server.max_connections,
+    }) catch {
+        std.log.err("Failed to create thread pool", .{});
+        return error.ThreadPoolError;
+    };
+    defer pool.deinit();
 
-    // 7. Accept loop
+    std.log.info("zimgx listening on {s}:{d} (workers={d})", .{ cfg.server.host, cfg.server.port, cfg.server.max_connections });
+
+    // 8. Accept loop — queue connections to the thread pool. Workers are
+    // reused across connections; when all are busy, new jobs queue internally.
     while (true) {
         const conn = listener.accept() catch {
             std.log.warn("Failed to accept connection", .{});
             continue;
         };
 
-        // Handle connection (single-threaded for now)
-        handleConnection(&server, conn);
+        pool.spawn(handleConnection, .{ &server, conn }) catch {
+            conn.stream.close();
+            std.log.warn("Failed to queue connection", .{});
+            continue;
+        };
     }
 }
 
 fn handleConnection(server: *Server, conn: net.Server.Connection) void {
     defer conn.stream.close();
 
-    // Create buffered reader/writer for the socket
     var read_buf: [8192]u8 = undefined;
     var write_buf: [8192]u8 = undefined;
     var stream_reader = conn.stream.reader(&read_buf);
     var stream_writer = conn.stream.writer(&write_buf);
 
-    // Initialize HTTP server for this connection
     var http_server = http.Server.init(stream_reader.interface(), &stream_writer.interface);
 
-    // Handle potentially multiple requests on the same connection (keep-alive)
+    // Keep-alive: handle multiple requests per connection
     while (true) {
-        var request = http_server.receiveHead() catch {
-            // Connection closed or invalid request
-            return;
-        };
+        var request = http_server.receiveHead() catch return;
 
-        // Extract headers we care about
         const headers = extractHeaders(request.head_buffer);
-
-        // Resolve route
         const route = router.resolve(request.head.target);
-
-        // Dispatch and get response
         const resp = server.dispatchRoute(route, headers.if_none_match, headers.accept);
-
-        // Convert status code to std.http.Status
         const status = std.meta.intToEnum(http.Status, resp.status) catch .internal_server_error;
 
-        // Build extra headers
         var extra_headers_buf: [4]http.Header = undefined;
         var num_extra: usize = 0;
 
@@ -569,16 +567,11 @@ fn handleConnection(server: *Server, conn: net.Server.Connection) void {
             num_extra += 1;
         }
 
-        // Send response
         request.respond(resp.body, .{
             .status = status,
             .extra_headers = extra_headers_buf[0..num_extra],
-        }) catch {
-            // Write failed -- connection is broken
-            return;
-        };
+        }) catch return;
 
-        // If the client requested connection close, stop
         if (!request.head.keep_alive) return;
     }
 }
