@@ -8,7 +8,7 @@ COPY build.zig build.zig.zon ./
 COPY src/ src/
 COPY test/ test/
 
-RUN zig build -Doptimize=ReleaseSafe
+RUN zig build -Doptimize=ReleaseSafe -Dcpu=baseline
 
 # --- Runtime stage ---
 FROM alpine:edge

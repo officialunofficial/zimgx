@@ -212,6 +212,17 @@ pub fn transform(
         const opts = buildThumbnailOptions(effective_fit, tp.gravity, eff_h);
         current = replaceImage(current, try bindings.thumbnailImage(current, thumb_width, opts));
 
+        // After resize, update page-height metadata for animated images so
+        // the GIF/WebP encoder splits frames at the correct boundary.
+        if (animated_output) {
+            const new_height = bindings.getHeight(current);
+            const pages = effective_pages orelse n_pages orelse 1;
+            const new_page_height = new_height / pages;
+            if (new_page_height > 0) {
+                bindings.setInt(current, "page-height", @intCast(new_page_height));
+            }
+        }
+
         // fit=pad: embed the resized image centered on a canvas of target dims
         // Skip pad for animated output (would pad the full stack height)
         if (tp.fit == .pad and !animated_output) {
@@ -378,7 +389,18 @@ fn encodeImage(
         .png => bindings.pngsaveBufferOpts(image, 6, do_strip),
         .webp => bindings.webpsaveBufferOpts(image, q, do_strip),
         .avif => bindings.avifsaveBufferOpts(image, q, do_strip),
-        .gif => bindings.gifsaveBuffer(image),
+        .gif => blk: {
+            // If page-height is stale (doesn't evenly divide the total
+            // height), reset to single-frame to prevent encoder SIGSEGV.
+            if (bindings.getPageHeight(image)) |ph| {
+                const h = bindings.getHeight(image);
+                if (ph > h or h % ph != 0) {
+                    bindings.setInt(image, "page-height", @intCast(h));
+                    bindings.setInt(image, "n-pages", 1);
+                }
+            }
+            break :blk bindings.gifsaveBuffer(image);
+        },
     };
 }
 
@@ -785,6 +807,64 @@ test "animated GIF + resize produces animated output" {
     try testing.expectEqual(OutputFormat.gif, result.format);
     try testing.expect(result.is_animated);
     try testing.expectEqual(@as(u32, 64), result.width);
+}
+
+test "animated gif resize preserves correct page-height for encoding" {
+    testInit();
+    const data = readAnimatedTestFixture() catch return;
+    defer testing.allocator.free(data);
+
+    // Resize to non-trivial dimension — this is the path that caused
+    // SIGSEGV before the page-height fix.
+    var p = TransformParams{};
+    p.width = 32;
+    p.height = 32;
+    p.format = .gif;
+
+    var result = try transform(data, p, "image/gif", null);
+    defer result.deinit();
+
+    try testing.expect(result.data.len > 0);
+    try testing.expectEqual(OutputFormat.gif, result.format);
+    try testing.expect(result.is_animated);
+    try testing.expectEqual(@as(u32, 32), result.width);
+}
+
+test "animated gif with effects encodes without segfault" {
+    testInit();
+    const data = readAnimatedTestFixture() catch return;
+    defer testing.allocator.free(data);
+
+    // Effects on animated images can corrupt frame boundaries.
+    // The pre-encode validation in encodeImage should catch this.
+    var p = TransformParams{};
+    p.width = 64;
+    p.sharpen = 1.5;
+    p.format = .gif;
+
+    var result = try transform(data, p, "image/gif", null);
+    defer result.deinit();
+
+    try testing.expect(result.data.len > 0);
+    try testing.expectEqual(OutputFormat.gif, result.format);
+}
+
+test "animated gif resize and blur encodes correctly" {
+    testInit();
+    const data = readAnimatedTestFixture() catch return;
+    defer testing.allocator.free(data);
+
+    var p = TransformParams{};
+    p.width = 48;
+    p.blur = 1.0;
+    p.format = .gif;
+
+    var result = try transform(data, p, "image/gif", null);
+    defer result.deinit();
+
+    try testing.expect(result.data.len > 0);
+    try testing.expectEqual(OutputFormat.gif, result.format);
+    try testing.expect(result.is_animated);
 }
 
 test "static image is not marked as animated" {
