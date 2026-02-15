@@ -209,17 +209,82 @@ pub fn transform(
             break :blk @max(1, @as(u32, @intFromFloat(clamped)));
         };
 
-        const opts = buildThumbnailOptions(effective_fit, tp.gravity, eff_h);
-        current = replaceImage(current, try bindings.thumbnailImage(current, thumb_width, opts));
-
-        // After resize, update page-height metadata for animated images so
-        // the GIF/WebP encoder splits frames at the correct boundary.
-        if (animated_output) {
-            const new_height = bindings.getHeight(current);
+        // For animated images with fit=cover, vips_thumbnail_image's crop
+        // operates on the full stacked frame buffer and corrupts frame
+        // boundaries (libvips#2668). Use a two-step approach instead:
+        //   1. Resize without crop (each frame >= target dims)
+        //   2. Crop per-frame and reassemble
+        if (animated_output and effective_fit == .cover and eff_w != null and eff_h != null) {
             const pages = effective_pages orelse n_pages orelse 1;
-            const new_page_height = new_height / pages;
-            if (new_page_height > 0) {
-                bindings.setInt(current, "page-height", @intCast(new_page_height));
+            const page_h = bindings.getPageHeight(current) orelse (source_h / pages);
+            const tw = eff_w.?;
+            const th = eff_h.?;
+
+            // Scale so each frame covers the target rectangle
+            const hscale = @as(f64, @floatFromInt(tw)) / @as(f64, @floatFromInt(source_w));
+            const vscale = @as(f64, @floatFromInt(th)) / @as(f64, @floatFromInt(page_h));
+            const scale = @max(hscale, vscale);
+            const resize_w: u32 = @max(1, @as(u32, @intFromFloat(@ceil(@as(f64, @floatFromInt(source_w)) * scale))));
+            const resize_page_h: u32 = @max(1, @as(u32, @intFromFloat(@ceil(@as(f64, @floatFromInt(page_h)) * scale))));
+            const resize_stack_h = resize_page_h * pages;
+
+            // Step 1: Resize without crop — pass stack height, no crop option
+            const resize_opts = bindings.ThumbnailOptions{ .height = resize_stack_h };
+            current = replaceImage(current, try bindings.thumbnailImage(current, resize_w, resize_opts));
+
+            const resized_page_h = bindings.getHeight(current) / pages;
+
+            // Step 2: Crop per-frame if needed
+            if (resized_page_h > th or bindings.getWidth(current) > tw) {
+                const cur_w = bindings.getWidth(current);
+                const crop_left: c_int = @intCast((cur_w - tw) / 2);
+                const crop_top: c_int = @intCast((resized_page_h - th) / 2);
+
+                if (crop_top == 0) {
+                    // Horizontal-only crop: single extract_area on full stack
+                    current = replaceImage(current, try bindings.crop(
+                        current,
+                        crop_left,
+                        0,
+                        @intCast(tw),
+                        @intCast(bindings.getHeight(current)),
+                    ));
+                } else {
+                    // Vertical crop needed: extract each frame, crop, reassemble
+                    var frames: [256]bindings.VipsImage = undefined;
+                    const frame_count = @min(pages, 256);
+                    var fi: u32 = 0;
+                    while (fi < frame_count) : (fi += 1) {
+                        const y_off: c_int = @intCast(fi * resized_page_h);
+                        frames[fi] = try bindings.crop(
+                            current,
+                            crop_left,
+                            y_off + crop_top,
+                            @intCast(tw),
+                            @intCast(th),
+                        );
+                    }
+                    const old = current;
+                    current = try bindings.arrayjoinVertical(frames[0..frame_count]);
+                    old.unref();
+                    for (frames[0..frame_count]) |f| f.unref();
+                }
+            }
+
+            bindings.setInt(current, "page-height", @intCast(th));
+        } else {
+            const opts = buildThumbnailOptions(effective_fit, tp.gravity, eff_h);
+            current = replaceImage(current, try bindings.thumbnailImage(current, thumb_width, opts));
+
+            // After resize, update page-height metadata for animated images so
+            // the GIF/WebP encoder splits frames at the correct boundary.
+            if (animated_output) {
+                const new_height = bindings.getHeight(current);
+                const pages = effective_pages orelse n_pages orelse 1;
+                const new_page_height = new_height / pages;
+                if (new_page_height > 0) {
+                    bindings.setInt(current, "page-height", @intCast(new_page_height));
+                }
             }
         }
 

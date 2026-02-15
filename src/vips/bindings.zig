@@ -523,6 +523,19 @@ pub fn findTrim(image: VipsImage, threshold: f64) VipsError!struct { left: c_int
     return .{ .left = left, .top = top, .width = width, .height = height };
 }
 
+/// Join an array of images vertically (one column).
+/// Used to reassemble cropped animation frames into a stacked buffer.
+pub fn arrayjoinVertical(images: []const VipsImage) VipsError!VipsImage {
+    var output: ?*c.VipsImage = null;
+    var ptrs: [256][*c]c.VipsImage = undefined;
+    const n: c_int = @intCast(@min(images.len, 256));
+    for (0..@intCast(n)) |i| {
+        ptrs[i] = images[i].ptr;
+    }
+    const ret = c.vips_arrayjoin(&ptrs, &output, n, "across", @as(c_int, 1), @as(?*const u8, null));
+    return toVipsImage(ret, output);
+}
+
 /// Extract a rectangular sub-region from an image.
 pub fn crop(image: VipsImage, left: c_int, top: c_int, width: c_int, height: c_int) VipsError!VipsImage {
     var output: ?*c.VipsImage = null;
