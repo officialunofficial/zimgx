@@ -4,7 +4,10 @@ export default defineConfig({
   title: "zimgx",
   description:
     "Fast, single-binary image proxy and transformation server. A self-hosted drop-in replacement for Cloudflare Images.",
-  logoUrl: "/logo.svg",
+  logoUrl: {
+    light: "/logo-black.svg",
+    dark: "/logo.svg",
+  },
   rootDir: "docs",
   topNav: [
     {
