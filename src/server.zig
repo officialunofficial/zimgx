@@ -132,6 +132,8 @@ pub const Server = struct {
     start_time: i64,
     /// Optional R2 origin fetcher (set when origin_type == .r2).
     r2_fetcher: ?*R2Fetcher = null,
+    /// Active connection count for rate limiting.
+    active_connections: u32 = 0,
 
     pub fn init(allocator: Allocator, cfg: Config, image_cache: Cache) Server {
         return .{
@@ -167,12 +169,14 @@ pub const Server = struct {
     // -----------------------------------------------------------------
 
     fn buildMetricsResponse(self: *Server) ServerResponse {
-        const now = std.time.timestamp();
-        self.stats.uptime_seconds = now - self.start_time;
-        self.stats.cache_entries = self.image_cache.size();
+        // Snapshot volatile stats for metrics — reads are non-atomic
+        // because exact precision is not required for monitoring.
+        var stats = self.stats;
+        stats.uptime_seconds = std.time.timestamp() - self.start_time;
+        stats.cache_entries = self.image_cache.size();
 
         var buf: [512]u8 = undefined;
-        const json = self.stats.toJson(&buf);
+        const json = stats.toJson(&buf);
 
         // Copy into thread-local buffer so the slice outlives this frame.
         const tl_buf = &metrics_tl_buf;
@@ -460,7 +464,7 @@ pub fn run(allocator: Allocator) !void {
         if (use_r2) {
             r2_variants_client = S3Client.init(allocator, cfg.r2.endpoint, cfg.r2.bucket_variants, r2_creds);
             r2c = R2Cache.init(allocator, &r2_variants_client);
-            tc = TieredCache.init(mc.cache(), r2c.cache());
+            tc = TieredCache.init(mc.cache(), r2c.cache(), allocator);
             break :blk tc.cache();
         }
 
@@ -498,16 +502,24 @@ pub fn run(allocator: Allocator) !void {
     };
     defer listener.deinit();
 
-    // 7. Create thread pool for connection handling
+    // 7. Create thread pool for connection handling.
+    // Explicit stack size: musl (Alpine) defaults to ~128KB which is too
+    // small for the deep call stacks through HTTP client + TLS + S3.
     var pool: std.Thread.Pool = undefined;
     pool.init(.{
         .allocator = allocator,
         .n_jobs = cfg.server.max_connections,
+        .stack_size = 2 * 1024 * 1024, // 2 MiB per worker
     }) catch {
         std.log.err("Failed to create thread pool", .{});
         return error.ThreadPoolError;
     };
     defer pool.deinit();
+
+    // Wire thread pool to tiered cache for async L2 writes.
+    if (use_r2 and cfg.cache.enabled) {
+        tc.pool = &pool;
+    }
 
     std.log.info("zimgx listening on {s}:{d} (workers={d})", .{ cfg.server.host, cfg.server.port, cfg.server.max_connections });
 
@@ -519,6 +531,14 @@ pub fn run(allocator: Allocator) !void {
             continue;
         };
 
+        // Rate limit: reject when at capacity.
+        const current = @atomicLoad(u32, &server.active_connections, .monotonic);
+        if (current >= cfg.server.max_connections) {
+            conn.stream.close();
+            std.log.warn("Connection rejected: at capacity ({d}/{d})", .{ current, cfg.server.max_connections });
+            continue;
+        }
+
         pool.spawn(handleConnection, .{ &server, conn }) catch {
             conn.stream.close();
             std.log.warn("Failed to queue connection", .{});
@@ -528,6 +548,8 @@ pub fn run(allocator: Allocator) !void {
 }
 
 fn handleConnection(server: *Server, conn: net.Server.Connection) void {
+    _ = @atomicRmw(u32, &server.active_connections, .Add, 1, .monotonic);
+    defer _ = @atomicRmw(u32, &server.active_connections, .Sub, 1, .monotonic);
     defer conn.stream.close();
 
     var read_buf: [8192]u8 = undefined;

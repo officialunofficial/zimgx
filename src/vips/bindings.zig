@@ -121,18 +121,27 @@ pub fn imageNewFromBufferAnimatedN(data: []const u8, n_frames: c_int) VipsError!
 // ---------------------------------------------------------------------------
 
 /// Return the image width in pixels.
+/// Guards against negative C return values to prevent @intCast UB.
 pub fn getWidth(image: VipsImage) u32 {
-    return @intCast(c.vips_image_get_width(image.ptr));
+    const raw = c.vips_image_get_width(image.ptr);
+    if (raw < 0) return 0;
+    return @intCast(raw);
 }
 
 /// Return the image height in pixels.
+/// Guards against negative C return values to prevent @intCast UB.
 pub fn getHeight(image: VipsImage) u32 {
-    return @intCast(c.vips_image_get_height(image.ptr));
+    const raw = c.vips_image_get_height(image.ptr);
+    if (raw < 0) return 0;
+    return @intCast(raw);
 }
 
 /// Return the number of bands (channels) in the image.
+/// Guards against negative C return values to prevent @intCast UB.
 pub fn getBands(image: VipsImage) u32 {
-    return @intCast(c.vips_image_get_bands(image.ptr));
+    const raw = c.vips_image_get_bands(image.ptr);
+    if (raw < 0) return 0;
+    return @intCast(raw);
 }
 
 /// Return true if the image has an alpha channel.
@@ -514,6 +523,19 @@ pub fn findTrim(image: VipsImage, threshold: f64) VipsError!struct { left: c_int
     return .{ .left = left, .top = top, .width = width, .height = height };
 }
 
+/// Join an array of images vertically (one column).
+/// Used to reassemble cropped animation frames into a stacked buffer.
+pub fn arrayjoinVertical(images: []const VipsImage) VipsError!VipsImage {
+    var output: ?*c.VipsImage = null;
+    var ptrs: [256][*c]c.VipsImage = undefined;
+    const n: c_int = @intCast(@min(images.len, 256));
+    for (0..@intCast(n)) |i| {
+        ptrs[i] = images[i].ptr;
+    }
+    const ret = c.vips_arrayjoin(&ptrs, &output, n, "across", @as(c_int, 1), @as(?*const u8, null));
+    return toVipsImage(ret, output);
+}
+
 /// Extract a rectangular sub-region from an image.
 pub fn crop(image: VipsImage, left: c_int, top: c_int, width: c_int, height: c_int) VipsError!VipsImage {
     var output: ?*c.VipsImage = null;
@@ -553,22 +575,10 @@ pub fn gFree(ptr: ?*anyopaque) void {
 // Tests
 // ===========================================================================
 
-/// Read the test fixture PNG at runtime. The path is resolved relative to
-/// the workspace root using the build-system's source root marker.
+/// Read the test fixture PNG at runtime. The cwd is the project root
+/// when running via `zig build test`.
 fn readTestFixture() ![]const u8 {
-    // When tests run, the cwd is the project root.
-    const file = std.fs.cwd().openFile("test/fixtures/test_4x4.png", .{}) catch {
-        // If CWD isn't project root, try absolute path as fallback.
-        const f = try std.fs.openFileAbsolute(
-            "/Users/christopherw/Workspaces/officialunofficial/zimg/test/fixtures/test_4x4.png",
-            .{},
-        );
-        const stat = try f.stat();
-        const buf = try testing.allocator.alloc(u8, stat.size);
-        const n = try f.readAll(buf);
-        f.close();
-        return buf[0..n];
-    };
+    const file = try std.fs.cwd().openFile("test/fixtures/test_4x4.png", .{});
     const stat = try file.stat();
     const buf = try testing.allocator.alloc(u8, stat.size);
     const n = try file.readAll(buf);

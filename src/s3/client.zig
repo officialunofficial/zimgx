@@ -161,10 +161,17 @@ pub const S3Client = struct {
         var client: http.Client = .{ .allocator = self.allocator };
         defer client.deinit();
 
+        // Provide a response writer to drain the PUT response body.
+        // Without one, the HTTP client may not fully consume the
+        // response, leading to connection issues on some TLS stacks.
+        var response_writer = std.Io.Writer.Allocating.init(self.allocator);
+        defer response_writer.deinit();
+
         const result = client.fetch(.{
             .location = .{ .url = url },
             .method = .PUT,
             .payload = data,
+            .response_writer = &response_writer.writer,
             .headers = .{
                 .user_agent = .{ .override = "zimgx/1.0" },
                 .content_type = .{ .override = content_type },

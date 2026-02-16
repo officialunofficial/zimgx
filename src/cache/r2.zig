@@ -4,10 +4,9 @@
 // implementation.  All S3 errors are caught and handled gracefully:
 // get returns null, put is best-effort, delete returns false.
 //
-// Since the Cache vtable interface has no "release" mechanism for
-// returned data, the last-fetched response is stored in the struct
-// itself and freed on the next get call.  This is safe for
-// single-threaded use.
+// Thread-safe via Mutex.  The last-fetched response is stored in the
+// struct itself (no "release" in the Cache vtable) and freed on the
+// next get call; the mutex serializes access to this shared state.
 
 const std = @import("std");
 const cache_mod = @import("cache.zig");
@@ -19,6 +18,7 @@ const S3Client = s3_client.S3Client;
 pub const R2Cache = struct {
     client: *S3Client,
     allocator: std.mem.Allocator,
+    mutex: std.Thread.Mutex = .{},
 
     /// Last-fetched data buffer, kept alive so the CacheEntry returned
     /// by get() remains valid until the next get() call.
@@ -60,6 +60,8 @@ pub const R2Cache = struct {
 
     fn vtableGet(ptr: *anyopaque, key: []const u8) ?CacheEntry {
         const self: *R2Cache = @ptrCast(@alignCast(ptr));
+        self.mutex.lock();
+        defer self.mutex.unlock();
 
         // Free previous last-fetched buffers.
         self.freeLastFetched();
@@ -94,6 +96,8 @@ pub const R2Cache = struct {
 
     fn vtablePut(ptr: *anyopaque, key: []const u8, entry: CacheEntry) void {
         const self: *R2Cache = @ptrCast(@alignCast(ptr));
+        self.mutex.lock();
+        defer self.mutex.unlock();
 
         var key_buf: [1024]u8 = undefined;
         const s3_key = sanitizeKey(key, &key_buf);
@@ -104,6 +108,8 @@ pub const R2Cache = struct {
 
     fn vtableDelete(ptr: *anyopaque, key: []const u8) bool {
         const self: *R2Cache = @ptrCast(@alignCast(ptr));
+        self.mutex.lock();
+        defer self.mutex.unlock();
 
         var key_buf: [1024]u8 = undefined;
         const s3_key = sanitizeKey(key, &key_buf);
@@ -174,19 +180,22 @@ pub const R2Cache = struct {
     ///
     /// Replaces `|` with `/` and collapses consecutive `/` so that
     /// empty segments (e.g. `path||format` → `path/format`) don't
-    /// create double-slash S3 keys.
+    /// create double-slash S3 keys.  Rejects keys containing `..`
+    /// to prevent directory traversal in the S3 key space.
     pub fn sanitizeKey(key: []const u8, buf: []u8) []const u8 {
         var out: usize = 0;
         var prev_slash = false;
         for (key) |raw| {
-            const c: u8 = if (raw == '|') '/' else raw;
-            if (c == '/' and prev_slash) continue;
+            const ch: u8 = if (raw == '|') '/' else raw;
+            if (ch == '/' and prev_slash) continue;
             if (out >= buf.len) break;
-            buf[out] = c;
+            buf[out] = ch;
             out += 1;
-            prev_slash = (c == '/');
+            prev_slash = (ch == '/');
         }
-        return buf[0..out];
+        const result = buf[0..out];
+        if (std.mem.indexOf(u8, result, "..") != null) return buf[0..0];
+        return result;
     }
 };
 
@@ -242,6 +251,12 @@ test "sanitizeKey leaves key unchanged when no pipes" {
     var buf: [256]u8 = undefined;
     const result = R2Cache.sanitizeKey("simple-key", &buf);
     try std.testing.expectEqualStrings("simple-key", result);
+}
+
+test "sanitizeKey rejects traversal sequences" {
+    var buf: [256]u8 = undefined;
+    const result = R2Cache.sanitizeKey("photos/../etc/passwd|w=400|webp", &buf);
+    try std.testing.expectEqualStrings("", result);
 }
 
 test "size returns 0" {

@@ -1,6 +1,6 @@
 # Architecture
 
-zimgx is a single-threaded HTTP image proxy. It fetches images from a configurable origin, transforms them with libvips, and serves results through a multi-tier cache.
+zimgx is an HTTP image proxy built for concurrent request handling. It fetches images from a configurable origin, transforms them with libvips, and serves results through a multi-tier cache.
 
 ## Request flow
 
@@ -109,7 +109,7 @@ zimgx uses a polymorphic `Cache` interface (vtable pattern) with multiple backen
 
 **Read path:** L1 hit → return. L1 miss → check L2 → promote to L1 → return.
 
-**Write path:** Write to both L1 and L2.
+**Write path:** L1 is written synchronously (fast). L2 is written asynchronously on a background thread to keep the R2 upload off the response path.
 
 **Delete path:** Delete from both L1 and L2.
 
@@ -212,10 +212,12 @@ Errors serialize to JSON:
 
 ---
 
-## Single-threaded design
+## Threading model
 
-zimgx runs a single-threaded accept loop. This is a deliberate choice:
+zimgx uses a bounded thread pool to handle concurrent requests. Each incoming connection is dispatched to a worker thread, bounded by a semaphore (`ZIMGX_SERVER_MAX_CONNECTIONS`, default 64).
 
-- **Simplicity** — No mutexes and no data races. Server-owned buffers are safely reused between requests.
-- **libvips threading** — libvips uses its own internal thread pool for image operations. The single Zig thread dispatches work to libvips, which parallelizes the heavy compute.
-- **Scaling** — Run multiple instances behind a load balancer. Each instance maintains its own L1 cache. The shared R2 L2 cache provides cross-instance persistence.
+- **Thread-per-connection** — Each request runs on its own thread with stack-local buffers. No shared mutable state on the hot path.
+- **Thread-safe caches** — `MemoryCache` uses `std.Thread.RwLock`. `R2Cache` uses `std.Thread.Mutex`. Atomic operations protect server stats counters.
+- **Async L2 writes** — The persistent R2 cache layer is written asynchronously on the thread pool after the response is sent, keeping origin upload latency off the critical path.
+- **libvips threading** — libvips uses its own internal thread pool for image operations. Each request thread dispatches work to libvips, which parallelizes the heavy compute.
+- **Horizontal scaling** — Run multiple instances behind a load balancer. Each instance maintains its own L1 cache. The shared R2 L2 cache provides cross-instance persistence.

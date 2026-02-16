@@ -29,7 +29,7 @@ pub fn contentTypeFromFormat(format: OutputFormat) []const u8 {
 /// string stored in a fixed-size `[16]u8` array.
 pub fn generateEtag(data: []const u8) [16]u8 {
     const limit = @min(data.len, 8192);
-    const hash = std.hash.Wyhash.hash(0, data[0..limit]);
+    const hash = std.hash.Wyhash.hash(data.len, data[0..limit]);
     var buf: [16]u8 = undefined;
     _ = std.fmt.bufPrint(&buf, "{x:0>16}", .{hash}) catch unreachable;
     return buf;

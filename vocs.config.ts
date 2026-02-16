@@ -49,6 +49,7 @@ export default defineConfig({
       items: [
         { text: "Deployment", link: "/deployment" },
         { text: "Architecture", link: "/architecture" },
+        { text: "Performance", link: "/performance" },
       ],
     },
   ],
