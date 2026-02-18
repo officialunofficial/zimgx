@@ -52,7 +52,7 @@ zimgx uses a two-tier cache to balance speed and persistence:
 | **L1** | In-memory LRU | Fastest | Lost on restart | No |
 | **L2** | R2 / S3 | Fast | Survives restarts | Yes |
 
-**Writes are non-blocking.** When a cache miss occurs, the response is sent to the client as soon as L1 is written. The L2 write happens asynchronously in the background, keeping the R2 upload off the response path.
+**Writes are best-effort and non-blocking.** On cache misses, zimgx still returns the response even when a cache backend skips a write (for example, cache disabled or entry too large). When L2 is enabled, its write happens asynchronously in the background, keeping the R2 upload off the response path.
 
 ### Tuning the L1 cache
 

@@ -111,6 +111,8 @@ zimgx uses a polymorphic `Cache` interface (vtable pattern) with multiple backen
 
 **Write path:** L1 is written synchronously (fast). L2 is written asynchronously on a background thread to keep the R2 upload off the response path.
 
+**Write fallback:** If a cache write is skipped (for example, cache disabled or variant too large for L1), the image response is still returned uncached.
+
 **Delete path:** Delete from both L1 and L2.
 
 When `ZIMGX_CACHE_ENABLED=false`, a `NoopCache` replaces all cache operations with no-ops.

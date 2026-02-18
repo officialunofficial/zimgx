@@ -49,8 +49,8 @@ Required when `ZIMGX_ORIGIN_TYPE=r2`. All fields must be non-empty.
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `ZIMGX_CACHE_ENABLED` | `bool` | `true` | Enable the in-memory L1 cache. When disabled, every request fetches from origin. |
-| `ZIMGX_CACHE_MAX_SIZE_BYTES` | `usize` | `536870912` (512 MiB) | Maximum memory for the L1 cache. Entries are evicted using LRU when exceeded. |
+| `ZIMGX_CACHE_ENABLED` | `bool` | `true` | Enable the in-memory L1 cache. When disabled, every request fetches from origin and is served uncached. |
+| `ZIMGX_CACHE_MAX_SIZE_BYTES` | `usize` | `536870912` (512 MiB) | Maximum memory for the L1 cache. Entries are evicted using LRU when exceeded; entries larger than the limit are served but not cached. |
 | `ZIMGX_CACHE_DEFAULT_TTL_SECONDS` | `u32` | `3600` | TTL for `Cache-Control: public, max-age=` headers on image responses |
 
 ## Validation
