@@ -67,7 +67,7 @@ The last path segment is treated as a transform string when it contains `=`. Tra
 | `h` | Height (px) | 1-8192 | - |
 | `q` | Quality | 1-100 | 80 |
 | `f` | Output format | `jpeg`, `png`, `webp`, `avif`, `gif`, `auto` | auto (negotiated) |
-| `fit` | Resize mode | `contain`, `cover`, `fill`, `inside`, `outside` | `contain` |
+| `fit` | Resize mode | `contain`, `cover`, `fill`, `inside`, `outside`, `pad` | `contain` |
 | `g` | Crop gravity | `center`, `north`, `south`, `east`, `west`, `ne`, `nw`, `se`, `sw`, `smart`, `attention` | `center` |
 | `sharpen` | Sharpen sigma | 0.0-10.0 | - |
 | `blur` | Gaussian blur sigma | 0.1-250.0 | - |
@@ -75,7 +75,7 @@ The last path segment is treated as a transform string when it contains `=`. Tra
 | `anim` | Animation mode | `true`, `false`, `auto`, `static`, `animate` | `auto` (`true`) |
 | `frame` | Extract single frame | 0-999 | - |
 
-See [docs/transforms.md](docs/transforms.md) for full details.
+See [docs/pages/transforms.mdx](docs/pages/transforms.mdx) for full details.
 
 ## Environment Variables
 
@@ -91,7 +91,7 @@ See [docs/transforms.md](docs/transforms.md) for full details.
 | `ZIMGX_R2_ACCESS_KEY_ID` | R2/S3 access key | - |
 | `ZIMGX_R2_SECRET_ACCESS_KEY` | R2/S3 secret key | - |
 
-See [docs/configuration.md](docs/configuration.md) for the full reference.
+See [docs/pages/configuration.mdx](docs/pages/configuration.mdx) for the full reference.
 
 ## Endpoints
 
@@ -144,7 +144,7 @@ See [docs/configuration.md](docs/configuration.md) for the full reference.
                                  Respond
 ```
 
-See [docs/architecture.md](docs/architecture.md) for full details.
+See [docs/pages/architecture.mdx](docs/pages/architecture.mdx) for full details.
 
 ## Performance
 
@@ -168,10 +168,10 @@ Run benchmarks locally with `zig build bench`.
 
 ## Documentation
 
-- [Configuration Reference](docs/configuration.md) &mdash; all `ZIMGX_*` environment variables
-- [Transform Parameters](docs/transforms.md) &mdash; resize, format, effects
-- [Deployment Guide](docs/deployment.md) &mdash; Docker, Compose, health checks
-- [Architecture](docs/architecture.md) &mdash; system design, module map, caching
+- [Configuration Reference](docs/pages/configuration.mdx) &mdash; all `ZIMGX_*` environment variables
+- [Transform Parameters](docs/pages/transforms.mdx) &mdash; resize, format, effects
+- [Deployment Guide](docs/pages/deployment.mdx) &mdash; Docker, Compose, health checks
+- [Architecture](docs/pages/architecture.mdx) &mdash; system design, module map, caching
 
 ## License
 
