@@ -79,6 +79,16 @@ pub const ServerResponse = struct {
     cache_control: ?[]const u8 = null,
     etag: ?[]const u8 = null,
     vary: ?[]const u8 = null,
+    /// Optional owned body for uncached fallback responses. Call `deinit`
+    /// after the response is sent to free this memory.
+    owned_body: ?[]u8 = null,
+
+    pub fn deinit(self: *ServerResponse, allocator: Allocator) void {
+        if (self.owned_body) |owned| {
+            allocator.free(owned);
+            self.owned_body = null;
+        }
+    }
 
     pub const health_ok = ServerResponse{
         .status = 200,
@@ -260,8 +270,9 @@ pub const Server = struct {
                 .content_type = ct,
                 .created_at = std.time.timestamp(),
             });
+            const resp = self.serveCachedOrBody(cache_key, if_none_match, fetch_result.data, ct);
             fetch_result.deinit(self.allocator);
-            return self.serveCachedOrError(cache_key, if_none_match);
+            return resp;
         };
 
         // Free the original fetch data (pipeline made its own copy via vips)
@@ -275,11 +286,13 @@ pub const Server = struct {
             .created_at = std.time.timestamp(),
         });
 
+        const resp = self.serveCachedOrBody(cache_key, if_none_match, transform_result.data, content_type);
+
         // Free the vips-allocated transform data (cache made its own copy)
         transform_result.deinit();
 
-        // 8. Serve from cache (the cache owns stable copies of all data)
-        return self.serveCachedOrError(cache_key, if_none_match);
+        // 8. Serve cached copy, or the uncached body if backend skipped write
+        return resp;
     }
 
     /// Fetch an image from the configured origin (HTTP or R2).
@@ -354,12 +367,65 @@ pub const Server = struct {
         };
     }
 
-    /// Retrieve from cache and serve, or return 500 if cache store failed.
-    fn serveCachedOrError(self: *Server, cache_key: []const u8, if_none_match: ?[]const u8) ServerResponse {
+    /// Retrieve from cache and serve, or fall back to a direct body response.
+    fn serveCachedOrBody(
+        self: *Server,
+        cache_key: []const u8,
+        if_none_match: ?[]const u8,
+        body: []const u8,
+        content_type: []const u8,
+    ) ServerResponse {
         if (self.image_cache.get(cache_key)) |entry| {
             return self.serveCachedEntry(entry, if_none_match);
         }
-        return self.buildErrorResponse(HttpError.internalError("failed to cache image"));
+
+        return self.serveUncachedBody(body, content_type, if_none_match);
+    }
+
+    /// Build a direct response when cache backends intentionally skip writes.
+    fn serveUncachedBody(
+        self: *Server,
+        body: []const u8,
+        content_type: []const u8,
+        if_none_match: ?[]const u8,
+    ) ServerResponse {
+        const owned_body = self.allocator.dupe(u8, body) catch {
+            return self.buildErrorResponse(HttpError.internalError("failed to allocate response body"));
+        };
+
+        // Generate ETag into thread-local buffer
+        const etag_raw = response_mod.generateEtag(owned_body);
+        const etag_buf = &etag_tl_buf;
+        @memcpy(etag_buf, &etag_raw);
+
+        // Check If-None-Match for 304
+        if (response_mod.shouldReturn304(if_none_match, etag_buf)) {
+            self.allocator.free(owned_body);
+            return .{
+                .status = 304,
+                .content_type = content_type,
+                .body = "",
+                .etag = etag_buf,
+            };
+        }
+
+        // Build Cache-Control into thread-local buffer
+        const cc_buf = &cc_tl_buf;
+        const cc = response_mod.buildCacheControl(
+            self.config.cache.default_ttl_seconds,
+            true,
+            cc_buf,
+        );
+
+        return .{
+            .status = 200,
+            .content_type = content_type,
+            .body = owned_body,
+            .cache_control = cc,
+            .etag = etag_buf,
+            .vary = "Accept",
+            .owned_body = owned_body,
+        };
     }
 };
 
@@ -565,7 +631,8 @@ fn handleConnection(server: *Server, conn: net.Server.Connection) void {
 
         const headers = extractHeaders(request.head_buffer);
         const route = router.resolve(request.head.target);
-        const resp = server.dispatchRoute(route, headers.if_none_match, headers.accept);
+        var resp = server.dispatchRoute(route, headers.if_none_match, headers.accept);
+        defer resp.deinit(server.allocator);
         const status = std.meta.intToEnum(http.Status, resp.status) catch .internal_server_error;
 
         var extra_headers_buf: [4]http.Header = undefined;
@@ -930,6 +997,56 @@ test "image request cache miss increments counter" {
     } };
     _ = ctx.server.dispatchRoute(route, null, null);
     try testing.expectEqual(@as(u64, 1), ctx.server.stats.cache_misses);
+}
+
+test "cache disabled falls back to direct response instead of 500" {
+    var ctx = testServer();
+
+    var resp = ctx.server.serveCachedOrBody(
+        "k",
+        null,
+        "image-bytes",
+        "image/jpeg",
+    );
+    defer resp.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(u16, 200), resp.status);
+    try testing.expectEqualStrings("image/jpeg", resp.content_type);
+    try testing.expectEqualStrings("image-bytes", resp.body);
+    try testing.expect(resp.cache_control != null);
+    try testing.expect(resp.etag != null);
+}
+
+test "oversized memory cache entry falls back to direct response" {
+    var mc = MemoryCache.init(testing.allocator, 4);
+    defer mc.deinit();
+
+    var server = Server.init(testing.allocator, Config.defaults(), mc.cache());
+
+    const key = "oversized";
+    const body = "payload larger than max cache size";
+
+    server.image_cache.put(key, .{
+        .data = body,
+        .content_type = "image/webp",
+        .created_at = std.time.timestamp(),
+    });
+
+    try testing.expect(server.image_cache.get(key) == null);
+
+    var resp = server.serveCachedOrBody(
+        key,
+        null,
+        body,
+        "image/webp",
+    );
+    defer resp.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(u16, 200), resp.status);
+    try testing.expectEqualStrings("image/webp", resp.content_type);
+    try testing.expectEqualStrings(body, resp.body);
+    try testing.expect(resp.cache_control != null);
+    try testing.expect(resp.etag != null);
 }
 
 // ---------------------------------------------------------------------------
