@@ -33,9 +33,9 @@ zimgx handles concurrent requests using a thread pool. Each incoming connection 
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `ZIMGX_SERVER_MAX_CONNECTIONS` | `64` | Maximum concurrent connections (thread pool size) |
+| `ZIMGX_SERVER_MAX_CONNECTIONS` | `256` | Maximum concurrent connections (thread pool size) |
 
-The server can handle many concurrent requests without blocking. Under sustained load, connections beyond the pool size wait for a worker to become available.
+The server can handle many concurrent requests without blocking. Under sustained load, once active connections hit the configured limit, new connections are rejected until capacity frees up.
 
 ### Scaling horizontally
 
@@ -59,7 +59,7 @@ zimgx uses a two-tier cache to balance speed and persistence:
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `ZIMGX_CACHE_MAX_SIZE_BYTES` | `536870912` (512 MiB) | Maximum L1 cache size |
-| `ZIMGX_CACHE_DEFAULT_TTL_SECONDS` | `86400` (24 hours) | Cache-Control max-age sent to clients |
+| `ZIMGX_CACHE_DEFAULT_TTL_SECONDS` | `3600` (1 hour) | Cache-Control max-age sent to clients |
 
 Increase `ZIMGX_CACHE_MAX_SIZE_BYTES` if your working set is large and you have memory to spare. The LRU eviction policy keeps the most recently accessed variants in memory.
 

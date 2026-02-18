@@ -176,6 +176,7 @@ Uses `vips_thumbnail_image` with fit mode mapping:
 | `fill` | `VIPS_SIZE_FORCE` — stretch to exact dimensions |
 | `inside` | `VIPS_SIZE_DOWN` — same as contain |
 | `outside` | `VIPS_SIZE_UP` — scale up to cover dimensions |
+| `pad` | Resize like `contain`, then embed into target canvas using background color |
 
 ### 5. Effects
 
@@ -214,7 +215,7 @@ Errors serialize to JSON:
 
 ## Threading model
 
-zimgx uses a bounded thread pool to handle concurrent requests. Each incoming connection is dispatched to a worker thread, bounded by a semaphore (`ZIMGX_SERVER_MAX_CONNECTIONS`, default 64).
+zimgx uses a bounded thread pool to handle concurrent requests. Each accepted connection is handled by a worker thread, with capacity controlled by `ZIMGX_SERVER_MAX_CONNECTIONS` (default `256`). When active connections reach that limit, new connections are rejected until capacity frees up.
 
 - **Thread-per-connection** — Each request runs on its own thread with stack-local buffers. No shared mutable state on the hot path.
 - **Thread-safe caches** — `MemoryCache` uses `std.Thread.RwLock`. `R2Cache` uses `std.Thread.Mutex`. Atomic operations protect server stats counters.
