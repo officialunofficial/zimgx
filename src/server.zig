@@ -474,7 +474,7 @@ pub fn run(allocator: Allocator) !void {
         break :blk nc.cache();
     };
     defer if (cfg.cache.enabled) mc.deinit();
-    defer if (use_r2) r2c.deinit();
+    defer if (use_r2 and cfg.cache.enabled) r2c.deinit();
 
     // 4. Create R2 origin fetcher (if using R2)
     if (use_r2) {
