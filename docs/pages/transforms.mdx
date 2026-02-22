@@ -90,11 +90,14 @@ Controls how the image fits the target dimensions.
 | `fill` | Stretch to exactly fill the dimensions. Ignores aspect ratio. |
 | `inside` | Same as `contain`. |
 | `outside` | Scale up to cover the dimensions. Preserves aspect ratio. |
+| `pad` | Resize like `contain`, then letterbox onto the target canvas using the background color. |
 
 ```
 /photo.jpg/w=400,h=400,fit=cover
 /photo.jpg/w=400,h=300,fit=fill
 ```
+
+With `fit=pad`, set both `w` and `h` to force a fixed output canvas. The padding color comes from `bg`/`background` and defaults to white. For animated output, `fit=pad` currently behaves like `contain`.
 
 ## Gravity
 
@@ -201,7 +204,7 @@ Gamma correction.
 
 ### `bg` / `background`
 
-Hex RGB color to flatten alpha channels onto before encoding. Useful when converting transparent PNGs to JPEG.
+Hex RGB color used for `fit=pad` canvas fill and alpha flattening before encoding. Useful when converting transparent PNGs to JPEG.
 
 - **Format:** 6-character hex, no `#` prefix
 
