@@ -32,7 +32,6 @@ const errors_mod = @import("http/errors.zig");
 const HttpError = errors_mod.HttpError;
 
 const params_mod = @import("transform/params.zig");
-const TransformParams = params_mod.TransformParams;
 const OutputFormat = params_mod.OutputFormat;
 
 const negotiate_mod = @import("transform/negotiate.zig");
@@ -59,11 +58,6 @@ const S3Client = s3_mod.S3Client;
 const signing = @import("s3/signing.zig");
 
 const pipeline = @import("transform/pipeline.zig");
-
-const alloc_mod = @import("allocator.zig");
-const RequestArena = alloc_mod.RequestArena;
-
-const vips = @import("vips/bindings.zig");
 
 // ---------------------------------------------------------------------------
 // Response types for testable logic
@@ -218,18 +212,15 @@ pub const Server = struct {
     // -----------------------------------------------------------------
 
     fn handleImageRequest(self: *Server, req: router.ImageRequest, if_none_match: ?[]const u8, accept_header: ?[]const u8) ServerResponse {
-        // 1. Parse transform params
         const transform_string = req.transform_string orelse "";
         const params = params_mod.parse(transform_string) catch {
             return self.buildErrorResponse(HttpError.badRequest("invalid transform parameters"));
         };
 
-        // 2. Validate params
         params.validate() catch {
             return self.buildErrorResponse(HttpError.unprocessableEntity("transform parameters out of range"));
         };
 
-        // 3. Compute cache key
         const format_str = if (params.format) |f| f.toString() else "auto";
         var cache_key_buf: [512]u8 = undefined;
         const cache_key = cache_mod.computeCacheKey(
@@ -239,7 +230,6 @@ pub const Server = struct {
             &cache_key_buf,
         );
 
-        // 4. Check cache
         if (self.image_cache.get(cache_key)) |entry| {
             _ = @atomicRmw(u64, &self.stats.cache_hits, .Add, 1, .monotonic);
             return self.serveCachedEntry(entry, if_none_match);
@@ -247,7 +237,6 @@ pub const Server = struct {
 
         _ = @atomicRmw(u64, &self.stats.cache_misses, .Add, 1, .monotonic);
 
-        // 5. Fetch from origin (HTTP or R2)
         var fetch_result = self.fetchFromOrigin(req.image_path) catch |err| {
             return switch (err) {
                 FetchError.NotFound => self.buildErrorResponse(HttpError.notFound("image not found at origin")),
@@ -257,13 +246,11 @@ pub const Server = struct {
             };
         };
 
-        // 6. Transform image via the pipeline
         const anim_cfg = pipeline.AnimConfig{
             .max_frames = self.config.transform.max_frames,
             .max_animated_pixels = self.config.transform.max_animated_pixels,
         };
         var transform_result = pipeline.transform(fetch_result.data, params, accept_header, anim_cfg) catch {
-            // Transform failed — cache and serve the original
             const ct = if (params.format) |f| response_mod.contentTypeFromFormat(f) else "application/octet-stream";
             self.image_cache.put(cache_key, .{
                 .data = fetch_result.data,
@@ -275,10 +262,8 @@ pub const Server = struct {
             return resp;
         };
 
-        // Free the original fetch data (pipeline made its own copy via vips)
         fetch_result.deinit(self.allocator);
 
-        // 7. Cache the transformed result
         const content_type = response_mod.contentTypeFromFormat(transform_result.format);
         self.image_cache.put(cache_key, .{
             .data = transform_result.data,
@@ -287,11 +272,8 @@ pub const Server = struct {
         });
 
         const resp = self.serveCachedOrBody(cache_key, if_none_match, transform_result.data, content_type);
-
-        // Free the vips-allocated transform data (cache made its own copy)
         transform_result.deinit();
 
-        // 8. Serve cached copy, or the uncached body if backend skipped write
         return resp;
     }
 
@@ -334,37 +316,7 @@ pub const Server = struct {
     /// Build a response from a cache entry, using thread-local buffers
     /// for ETag and Cache-Control so the slices outlive this function.
     fn serveCachedEntry(self: *Server, entry: CacheEntry, if_none_match: ?[]const u8) ServerResponse {
-        // Generate ETag into thread-local buffer
-        const etag_raw = response_mod.generateEtag(entry.data);
-        const etag_buf = &etag_tl_buf;
-        @memcpy(etag_buf, &etag_raw);
-
-        // Check If-None-Match for 304
-        if (response_mod.shouldReturn304(if_none_match, etag_buf)) {
-            return .{
-                .status = 304,
-                .content_type = entry.content_type,
-                .body = "",
-                .etag = etag_buf,
-            };
-        }
-
-        // Build Cache-Control into thread-local buffer
-        const cc_buf = &cc_tl_buf;
-        const cc = response_mod.buildCacheControl(
-            self.config.cache.default_ttl_seconds,
-            true,
-            cc_buf,
-        );
-
-        return .{
-            .status = 200,
-            .content_type = entry.content_type,
-            .body = entry.data,
-            .cache_control = cc,
-            .etag = etag_buf,
-            .vary = "Accept",
-        };
+        return self.buildImageResponse(entry.data, entry.content_type, if_none_match, null);
     }
 
     /// Retrieve from cache and serve, or fall back to a direct body response.
@@ -393,14 +345,26 @@ pub const Server = struct {
             return self.buildErrorResponse(HttpError.internalError("failed to allocate response body"));
         };
 
-        // Generate ETag into thread-local buffer
-        const etag_raw = response_mod.generateEtag(owned_body);
+        return self.buildImageResponse(owned_body, content_type, if_none_match, owned_body);
+    }
+
+    /// Common response builder for image data. Handles ETag generation,
+    /// 304 Not Modified checks, and Cache-Control headers using
+    /// thread-local buffers. When `owned` is non-null, it will be freed
+    /// on 304 and attached to the response for later cleanup on 200.
+    fn buildImageResponse(
+        self: *Server,
+        data: []const u8,
+        content_type: []const u8,
+        if_none_match: ?[]const u8,
+        owned: ?[]u8,
+    ) ServerResponse {
+        const etag_raw = response_mod.generateEtag(data);
         const etag_buf = &etag_tl_buf;
         @memcpy(etag_buf, &etag_raw);
 
-        // Check If-None-Match for 304
         if (response_mod.shouldReturn304(if_none_match, etag_buf)) {
-            self.allocator.free(owned_body);
+            if (owned) |o| self.allocator.free(o);
             return .{
                 .status = 304,
                 .content_type = content_type,
@@ -409,7 +373,6 @@ pub const Server = struct {
             };
         }
 
-        // Build Cache-Control into thread-local buffer
         const cc_buf = &cc_tl_buf;
         const cc = response_mod.buildCacheControl(
             self.config.cache.default_ttl_seconds,
@@ -420,11 +383,11 @@ pub const Server = struct {
         return .{
             .status = 200,
             .content_type = content_type,
-            .body = owned_body,
+            .body = data,
             .cache_control = cc,
             .etag = etag_buf,
             .vary = "Accept",
-            .owned_body = owned_body,
+            .owned_body = owned,
         };
     }
 };
@@ -436,9 +399,7 @@ pub const Server = struct {
 /// Convert an HttpError to a static JSON string.  Uses a set of
 /// comptime-known strings so no dynamic allocation is needed.
 fn errorToStaticJson(err: HttpError) []const u8 {
-    // For well-known errors, return compile-time string literals.
-    // For others, fall back to a generic message.
-    if (err.detail != null) {
+    if (err.detail) |_| {
         // Detail requires dynamic formatting; copy into thread-local
         // storage so the slice outlives this function.
         var buf: [512]u8 = undefined;
@@ -495,19 +456,16 @@ pub fn extractHeaders(head_buffer: []const u8) RequestHeaders {
 // ---------------------------------------------------------------------------
 
 pub fn run(allocator: Allocator) !void {
-    // 1. Load config
     const cfg = Config.loadFromEnv(allocator) catch {
         std.log.err("Failed to load configuration from environment", .{});
         return error.ConfigError;
     };
 
-    // 2. Validate config
     cfg.validate() catch {
         std.log.err("Invalid configuration", .{});
         return error.ConfigError;
     };
 
-    // 3. Create cache (with optional R2 tiered cache)
     const use_r2 = cfg.origin.origin_type == .r2;
 
     const r2_creds: signing.Credentials = if (use_r2) .{
@@ -542,19 +500,16 @@ pub fn run(allocator: Allocator) !void {
     defer if (cfg.cache.enabled) mc.deinit();
     defer if (use_r2 and cfg.cache.enabled) r2c.deinit();
 
-    // 4. Create R2 origin fetcher (if using R2)
     if (use_r2) {
         r2_originals_client = S3Client.init(allocator, cfg.r2.endpoint, cfg.r2.bucket_originals, r2_creds);
         r2_fetcher = R2Fetcher.init(&r2_originals_client);
     }
 
-    // 5. Create server
     var server = Server.init(allocator, cfg, image_cache);
     if (use_r2) {
         server.r2_fetcher = &r2_fetcher;
     }
 
-    // 6. Bind and listen
     const address = net.Address.parseIp4(cfg.server.host, cfg.server.port) catch {
         std.log.err("Failed to parse listen address: {s}:{d}", .{ cfg.server.host, cfg.server.port });
         return error.AddressError;
@@ -568,7 +523,6 @@ pub fn run(allocator: Allocator) !void {
     };
     defer listener.deinit();
 
-    // 7. Create thread pool for connection handling.
     // Explicit stack size: musl (Alpine) defaults to ~128KB which is too
     // small for the deep call stacks through HTTP client + TLS + S3.
     var pool: std.Thread.Pool = undefined;
@@ -589,8 +543,6 @@ pub fn run(allocator: Allocator) !void {
 
     std.log.info("zimgx listening on {s}:{d} (workers={d})", .{ cfg.server.host, cfg.server.port, cfg.server.max_connections });
 
-    // 8. Accept loop — queue connections to the thread pool. Workers are
-    // reused across connections; when all are busy, new jobs queue internally.
     while (true) {
         const conn = listener.accept() catch {
             std.log.warn("Failed to accept connection", .{});
@@ -625,7 +577,6 @@ fn handleConnection(server: *Server, conn: net.Server.Connection) void {
 
     var http_server = http.Server.init(stream_reader.interface(), &stream_writer.interface);
 
-    // Keep-alive: handle multiple requests per connection
     while (true) {
         var request = http_server.receiveHead() catch return;
 
